@@ -52,9 +52,8 @@ type HailOutlook struct {
 	MaxCAPE  float64
 	MinFZL   float64 // isoterma 0 °C más baja del período
 	Explicit bool
-	Crossed  bool     // se pudo contrastar con GFS
-	Notes    []string // por qué se subió el riesgo (avisos, observaciones)
-	Disagree bool     // GFS contradice a ICON en alguna hora de riesgo
+	Crossed  bool // se pudo contrastar con GFS
+	Disagree bool // GFS contradice a ICON en alguna hora de riesgo
 }
 
 // Window devuelve la primera y la última hora con riesgo >= r (ok=false si no hay).
@@ -296,40 +295,6 @@ func deref[T any](s []*T, i int) T {
 		return zero
 	}
 	return *s[i]
-}
-
-// HailBoost sube el riesgo a un piso hasta cierto momento, por algo que el modelo no ve.
-type HailBoost struct {
-	Floor  HailRisk
-	Until  time.Time
-	Reason string
-}
-
-// Boosted devuelve una copia con el riesgo subido (nunca bajado) según los boosts.
-// Las horas del modelo son locales de la ciudad, así que contamos horas desde
-// la actual en vez de comparar relojes.
-func (o *HailOutlook) Boosted(now time.Time, boosts []HailBoost) *HailOutlook {
-	if o == nil || len(boosts) == 0 {
-		return o
-	}
-	c := *o
-	c.Hours = append([]HailHour(nil), o.Hours...)
-	c.Notes = nil
-	c.Max = 0
-	start := now.Truncate(time.Hour)
-	for _, b := range boosts {
-		n := int(math.Ceil(b.Until.Sub(start).Hours()))
-		for i := range c.Hours {
-			if i < n {
-				c.Hours[i].Risk = max(c.Hours[i].Risk, b.Floor)
-			}
-		}
-		c.Notes = append(c.Notes, b.Reason)
-	}
-	for _, h := range c.Hours {
-		c.Max = max(c.Max, h.Risk)
-	}
-	return &c
 }
 
 // PeakCAPE: el CAPE más alto entre las horas con riesgo (0 si no hay ninguna).

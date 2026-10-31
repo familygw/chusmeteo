@@ -269,24 +269,6 @@ func TestHailRiskLowFreezingLevel(t *testing.T) {
 	}
 }
 
-func TestBoosted(t *testing.T) {
-	o := &HailOutlook{}
-	for i := 0; i < 6; i++ {
-		o.Hours = append(o.Hours, HailHour{Risk: HailLow})
-	}
-	now := time.Date(2026, 10, 31, 17, 15, 0, 0, time.UTC)
-	b := o.Boosted(now, []HailBoost{{Floor: HailModerate, Until: now.Add(2 * time.Hour), Reason: "x"}})
-	if b.Max != HailModerate || b.Hours[0].Risk != HailModerate || b.Hours[3].Risk != HailLow || len(b.Notes) != 1 {
-		t.Errorf("boosted: %+v", b)
-	}
-	if o.Hours[0].Risk != HailLow {
-		t.Error("el original no se debe modificar")
-	}
-	if o.Boosted(now, nil) != o {
-		t.Error("sin boosts devuelve el mismo")
-	}
-}
-
 func TestRecentLinks(t *testing.T) {
 	now := time.Date(2026, 10, 31, 19, 0, 0, 0, time.Local)
 	got := recentLinks([]string{

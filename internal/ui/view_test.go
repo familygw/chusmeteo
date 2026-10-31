@@ -405,3 +405,14 @@ func TestSatView(t *testing.T) {
 		t.Error("sin -hardcore no hay vista satélite")
 	}
 }
+
+func TestHailSummarySeparatesOfficialAndModel(t *testing.T) {
+	m := fakeModel(200, 50, Options{})
+	s := m.hailSummary()
+	if !strings.Contains(s, "SMN") || !strings.Contains(s, "ICON") {
+		t.Errorf("falta SMN o ICON: %q", s)
+	}
+	if w := lipgloss.Width(s); w > 38 {
+		t.Errorf("el resumen mide %d: se envolvería y dejaría un hueco negro", w)
+	}
+}

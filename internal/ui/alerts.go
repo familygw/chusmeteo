@@ -113,42 +113,16 @@ func (m Model) ensureObs() (Model, tea.Cmd) {
 	}
 }
 
-// hailOutlook: el pronóstico de ICON subido con lo que el modelo no ve
-// (avisos del SMN y observaciones de aeropuertos cercanos).
-func (m Model) hailOutlook() *api.HailOutlook {
-	o := m.hail.outlook
-	if o == nil {
-		return nil
-	}
-	var boosts []api.HailBoost
+// officialHail: el nivel más alto entre los avisos del SMN con granizo que cubren la ciudad.
+func (m Model) officialHail() (api.Level, bool) {
 	city, _ := m.cityAlerts()
+	lvl, ok := api.LevelNone, false
 	for _, a := range city {
-		if !a.Hail {
-			continue
-		}
-		floor := api.HailModerate
-		if a.Level >= api.LevelOrange {
-			floor = api.HailHigh
-		}
-		until := a.Expires
-		if until.IsZero() {
-			until = m.now.Add(3 * time.Hour)
-		}
-		boosts = append(boosts, api.HailBoost{Floor: floor, Until: until, Reason: "aviso SMN " + strings.ToLower(a.Level.String())})
-		break // con el más grave alcanza (cityAlerts ya viene ordenado)
-	}
-	for _, s := range m.obs.st {
-		if s.DistKm > hailNear {
-			continue
-		}
-		switch {
-		case !s.HailAt.IsZero() && m.now.Sub(s.HailAt) <= hailFresh:
-			boosts = append(boosts, api.HailBoost{Floor: api.HailHigh, Until: m.now.Add(2 * time.Hour), Reason: "granizo observado en " + s.ICAO})
-		case !s.ThunderAt.IsZero() && m.now.Sub(s.ThunderAt) <= hailFresh:
-			boosts = append(boosts, api.HailBoost{Floor: api.HailModerate, Until: m.now.Add(2 * time.Hour), Reason: "tormenta observada en " + s.ICAO})
+		if a.Hail {
+			lvl, ok = max(lvl, a.Level), true
 		}
 	}
-	return o.Boosted(m.now, boosts)
+	return lvl, ok
 }
 
 // hailObserved: estación cercana que reportó granizo hace poco.
@@ -224,7 +198,7 @@ func (m Model) cityAlerts() (city, all []*api.Alert) {
 // alertBadge: indicador para la barra superior ("" si no hay nada que avisar).
 func (m Model) alertBadge(short bool) string {
 	city, all := m.cityAlerts()
-	ho := m.hailOutlook()
+	ho := m.hail.outlook
 	hailRisk := ho != nil && ho.Max >= api.HailModerate
 	if countHail(city) > 0 {
 		hailRisk = true
@@ -364,14 +338,14 @@ func (m Model) popupLines(w int) []string {
 
 	// ICON
 	lines = append(lines, hi("MODELO ICON · PRÓXIMAS 24 H (estimación)"))
-	o := m.hailOutlook()
+	o := m.hail.outlook
 	switch {
 	case o == nil && m.hail.err != nil:
 		lines = append(lines, text("Sin datos: "+m.hail.err.Error()))
 	case o == nil:
 		lines = append(lines, text("Esperando el pronóstico..."))
 	default:
-		risk := popupText.Render("Riesgo de granizo: ") + riskStyle[o.Max].Render(" "+o.Max.String()+" ")
+		risk := popupText.Render("Riesgo según el modelo: ") + riskStyle[o.Max].Render(" "+o.Max.String()+" ")
 		lines = append(lines, pad(risk))
 		if o.Max > api.HailNone {
 			ref := o.Hours[0].Time
@@ -396,11 +370,8 @@ func (m Model) popupLines(w int) []string {
 		default:
 			lines = append(lines, text("Contrastado con GFS: no lo contradice."))
 		}
-		if city, _ := m.cityAlerts(); o.Max < api.HailModerate && countHail(city) > 0 {
-			lines = append(lines, hi("Ojo: aviso SMN con granizo en tu ciudad; el modelo lo subestima."))
-		}
-		if len(o.Notes) > 0 {
-			lines = append(lines, hi("Subido por: "+strings.Join(o.Notes, ", ")))
+		if lvl, ok := m.officialHail(); ok && o.Max < api.HailModerate {
+			lines = append(lines, hi("Ojo: el SMN avisa "+strings.ToLower(lvl.String())+" con granizo y el modelo no lo ve."))
 		}
 		lines = append(lines,
 			text("Granizo explícito en ICON (códigos 96/99): "+explicit),

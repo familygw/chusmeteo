@@ -361,14 +361,32 @@ func truncate(s string, n int) string {
 	return string(r[:n-1]) + "…"
 }
 
-// hailSummary: una línea con el riesgo de granizo según ICON.
+// hailSummary: una línea con el aviso oficial (SMN) y el riesgo del modelo (ICON), por separado.
+// Tiene que entrar en el ancho de la columna (38): si se envuelve, se ve un hueco negro.
 func (m Model) hailSummary() string {
-	o := m.hailOutlook()
+	const room = 38
+	var parts []string // texto plano y estilo, para medir antes de pintar
+	var out string
+	add := func(st lipgloss.Style, txt string) {
+		out += st.Render(txt)
+		parts = append(parts, txt)
+	}
+	width := func() int { return lipgloss.Width(strings.Join(parts, "")) }
+
+	if lvl, ok := m.officialHail(); ok {
+		col := map[api.Level]lipgloss.Color{api.LevelYellow: vgaYellow, api.LevelOrange: lipgloss.Color("#FF8800"), api.LevelRed: vgaLRed}[lvl]
+		add(valueStyle, "SMN ")
+		add(valueStyle.Foreground(col), lvl.String())
+		add(base, " · ")
+	}
+	o := m.hail.outlook
 	if o == nil {
 		if m.hail.err != nil {
-			return base.Render("sin datos de ICON")
+			add(base, "ICON sin datos")
+		} else {
+			add(base, "consultando ICON...")
 		}
-		return base.Render("consultando ICON...")
+		return out
 	}
 	styles := map[api.HailRisk]lipgloss.Style{
 		api.HailNone:     valueStyle.Foreground(vgaLGreen),
@@ -376,17 +394,23 @@ func (m Model) hailSummary() string {
 		api.HailModerate: valueStyle.Foreground(vgaYellow),
 		api.HailHigh:     valueStyle.Foreground(vgaLRed).Blink(true),
 	}
-	out := styles[o.Max].Render(o.Max.String())
+	add(base, "ICON ")
+	add(styles[o.Max], o.Max.String())
 	if eps := o.Episodes(max(o.Max, api.HailLow)); len(eps) > 0 && o.Max > api.HailNone {
-		out += valueStyle.Render(" " + eps[0].Label(o.Hours[0].Time))
+		if l := " " + eps[0].Label(o.Hours[0].Time); width()+lipgloss.Width(l) <= room-5 {
+			add(valueStyle, l)
+		}
 	}
-	return out + base.Render(" · F4")
+	if width()+5 <= room {
+		add(base, " · F4")
+	}
+	return out
 }
 
 // riskStrip: una fila de colores con el riesgo de granizo por hora, alineada
 // con las barras del gráfico ("" si no hay datos de ICON).
 func (m Model) riskStrip(hours []api.Hour, w int) string {
-	o := m.hailOutlook()
+	o := m.hail.outlook
 	if o == nil || len(hours) == 0 {
 		return ""
 	}
