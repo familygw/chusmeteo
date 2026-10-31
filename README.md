@@ -15,7 +15,10 @@ Tres vistas:
 Y con **F4**, un popup al estilo de los diálogos de Norton Commander con todo lo
 que hay sobre **granizo**: los avisos vigentes del SMN para tu ciudad (y cuántos hay
 en el resto del país) y el riesgo de las próximas 24 h según el modelo ICON, contrastado
-con GFS. Cada tramo de riesgo indica el día ("hoy 15–18 h", "mañana 14 h"). Si hay
+con GFS. Cada tramo de riesgo indica el día ("hoy 15–18 h", "mañana 14 h"). También
+muestra lo **observado** en los aeropuertos cercanos (METAR, hasta ~200 km): tormenta (`TS`) y
+granizo (`GR`) reportados en las últimas 3 h. Si una estación a menos de 100 km reporta
+granizo en los últimos 90 min, la barra superior avisa igual. Si hay
 algo, la barra superior titila con `⚠ AVISO SMN` o `⚠ GRANIZO?`.
 
 Las vistas de mapa "se reciben" como en una PC de los 90 conectada a una antena:
@@ -44,7 +47,10 @@ go run ./cmd/chusmeteo
 go run ./cmd/chusmeteo -city "Mendoza" -view mapa
 go run ./cmd/chusmeteo -view radar -nofx    # sin efecto de recepción
 go run ./cmd/chusmeteo -hardcore            # agrega la vista SAT (RTL-SDR)
+go run ./cmd/chusmeteo -gps                 # usa la ubicación de tu Mac
 ```
+
+**Ubicación (macOS).** `-gps` (o la tecla `g`) ubica la compu con CoreLocation. Las Mac no tienen GPS: estima con Wi-Fi, así que tenelo prendido. Requiere `brew install --cask corelocationcli` y darle permiso de localización a tu terminal (Ajustes del Sistema > Privacidad y seguridad > Localización); la primera vez puede aparecer un diálogo.
 
 **Modo hardcore.** Con `-hardcore` aparece la pestaña `4 SAT`: recibe imágenes reales de
 Meteor-M (LRPT, ~137 MHz) con un RTL-SDR y una antena (V-dipolo o QFH). Requiere
@@ -60,6 +66,7 @@ O con `make`: `make run`, `make test`, `make build`, `make build-all`.
 |------------------|-----------------------------------------------------|
 | `F2` / `Tab`     | Cambiar de vista (`1` clima · `2` mapa · `3` radar)  |
 | `F3` / `/`       | Buscar ciudad (`"Córdoba, ES"` filtra por país)     |
+| `g`              | Usar la ubicación de la compu (macOS)               |
 | `F4` / `!`       | Avisos del SMN y riesgo de granizo (popup)          |
 | `F5` / `r`       | Refrescar ahora                                     |
 | `a`              | Repetir la recepción del satélite                   |
@@ -202,11 +209,13 @@ Detalles de Go que aparecen en el código y conviene mirar:
   - avisos del resto del país con *drill down*: lista de avisos vigentes por provincia y detalle de cada uno
   - avisos vencidos del día (historial), para ver qué pasó aunque ya no estén vigentes
   - predicción de pasadas de Meteor-M (TLE + SGP4) para saber cuándo capturar
+  - rayos casi en vivo del GLM de GOES-East (NOAA en AWS, NetCDF) sobre el radar
 
 ## Datos y atribución
 
 - Geografía: [Natural Earth](https://www.naturalearthdata.com) (dominio público)
 - Avisos: [Servicio Meteorológico Nacional](https://ssl.smn.gob.ar/CAP/AR.php) (CAP)
+- Observaciones: [Aviation Weather Center (NOAA)](https://aviationweather.gov/data/api/), METAR/SPECI, sin clave
 - Pronóstico y grilla: [Open-Meteo](https://open-meteo.com) (CC BY 4.0; gratis para uso no comercial, sin API key, ~10.000 llamadas/día)
 - Radar: [Rain Viewer](https://www.rainviewer.com/api.html) (uso personal/educativo; atribución visible obligatoria; zoom máx. 7)
 - Los umbrales de intensidad del radar se infieren del color (esquema 2, "Universal Blue") y son aproximados: ver `render.RadarLevel`.

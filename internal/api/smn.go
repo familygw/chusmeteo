@@ -4,11 +4,16 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha1"
+	"encoding/hex"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
@@ -81,6 +86,7 @@ func (a *Alert) Covers(pt geo.LatLon) bool {
 type AlertsResult struct {
 	Current []string          // URLs que hoy están en el índice
 	New     map[string]*Alert // avisos que no teníamos (nil = falló ese XML)
+	Limited bool              // quedaron avisos sin bajar (tope o HTTP 429)
 }
 
 // FetchAlerts lee el índice y baja sólo los avisos que no están en `known`.
@@ -92,38 +98,134 @@ func FetchAlerts(ctx context.Context, known map[string]bool) (*AlertsResult, err
 		return nil, fmt.Errorf("avisos SMN: %w", err)
 	}
 	links := parseIndex(body, smnIndexURL)
+	links = recentLinks(links, time.Now())
 	res := &AlertsResult{Current: links, New: map[string]*Alert{}}
+
+	// Primero lo que ya tenemos en disco (el XML de un aviso no cambia), después
+	// la red, lo más nuevo primero y con tope: el SMN responde 429 si nos pasamos.
+	var todo []string
+	for _, link := range links {
+		if known[link] {
+			continue
+		}
+		if body, ok := capCacheGet(link); ok {
+			if a, err := ParseCAP(body, link); err == nil {
+				res.New[link] = a
+				continue
+			}
+		}
+		todo = append(todo, link)
+	}
+	sort.Sort(sort.Reverse(sort.StringSlice(todo))) // los nombres llevan la fecha: AAAA_MM_DD_HHMM
+	if len(todo) > maxFetchPerPass {
+		todo = todo[:maxFetchPerPass]
+		res.Limited = true
+	}
 
 	var (
 		wg   sync.WaitGroup
 		mu   sync.Mutex
 		sem  = make(chan struct{}, 4) // amables con el SMN
 		errs int
+		stop bool // el SMN dijo 429: no insistimos
 	)
-	for _, link := range links {
-		if known[link] {
-			continue
-		}
+	for _, link := range todo {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			a, err := fetchAlert(ctx, link)
+			mu.Lock()
+			skip := stop
+			mu.Unlock()
+			if skip {
+				return
+			}
+			body, err := getBytes(ctx, link)
+			var a *Alert
+			if err == nil {
+				a, err = ParseCAP(body, link)
+			}
 			mu.Lock()
 			defer mu.Unlock()
 			if err != nil {
 				errs++
+				if errors.Is(err, ErrRateLimited) {
+					stop, res.Limited = true, true
+				}
 				return // no lo guardamos: se reintenta en la próxima pasada
 			}
+			capCachePut(link, body)
 			res.New[link] = a
 		}()
 	}
 	wg.Wait()
-	if errs > 0 && len(res.New) == 0 && len(links) > 0 && len(known) == 0 {
+	if len(res.New) == 0 && len(known) == 0 && len(todo) > 0 && errs > 0 {
+		if res.Limited {
+			return nil, fmt.Errorf("avisos SMN: %w (se reintenta en 10 min)", ErrRateLimited)
+		}
 		return nil, fmt.Errorf("avisos SMN: no se pudo leer ningún aviso (%d errores)", errs)
 	}
 	return res, nil
+}
+
+// ErrRateLimited: el SMN devolvió HTTP 429.
+var ErrRateLimited = errors.New("el SMN limitó los pedidos (HTTP 429)")
+
+const (
+	maxFetchPerPass = 60
+	maxAlertAge     = 3 * 24 * time.Hour
+)
+
+var linkDateRe = regexp.MustCompile(`(\d{4})_(\d{2})_(\d{2})_(\d{2})(\d{2})`)
+
+// recentLinks descarta avisos de hace días (la fecha va en el nombre del archivo).
+// Los links sin fecha en el nombre se conservan.
+func recentLinks(links []string, now time.Time) []string {
+	out := links[:0:0]
+	for _, l := range links {
+		if m := linkDateRe.FindStringSubmatch(l); m != nil {
+			n := func(i int) int { v, _ := strconv.Atoi(m[i]); return v }
+			t := time.Date(n(1), time.Month(n(2)), n(3), n(4), n(5), 0, 0, time.Local)
+			if now.Sub(t) > maxAlertAge {
+				continue
+			}
+		}
+		out = append(out, l)
+	}
+	return out
+}
+
+// capCacheDir: caché en disco de los XML (vacío = sin caché). Sobrevive a reinicios.
+var capCacheDir = func() string {
+	d, err := os.UserCacheDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(d, "chusmeteo", "cap")
+}()
+
+func capCachePath(link string) string {
+	if capCacheDir == "" {
+		return ""
+	}
+	h := sha1.Sum([]byte(link))
+	return filepath.Join(capCacheDir, hex.EncodeToString(h[:8])+".xml")
+}
+
+func capCacheGet(link string) ([]byte, bool) {
+	p := capCachePath(link)
+	if p == "" {
+		return nil, false
+	}
+	b, err := os.ReadFile(p)
+	return b, err == nil
+}
+
+func capCachePut(link string, body []byte) {
+	if p := capCachePath(link); p != "" && os.MkdirAll(capCacheDir, 0o755) == nil {
+		_ = os.WriteFile(p, body, 0o644)
+	}
 }
 
 // parseIndex saca los links a XML CAP del RSS. Si el formato cambia (o viene
@@ -344,6 +446,9 @@ func getBytes(ctx context.Context, u string) ([]byte, error) {
 		return nil, err
 	}
 	defer res.Body.Close()
+	if res.StatusCode == http.StatusTooManyRequests {
+		return nil, ErrRateLimited
+	}
 	if res.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("HTTP %d", res.StatusCode)
 	}

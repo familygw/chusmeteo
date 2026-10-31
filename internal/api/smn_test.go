@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -97,6 +98,7 @@ func TestParseIndex(t *testing.T) {
 }
 
 func TestFetchAlertsIncremental(t *testing.T) {
+	capCacheDir = ""
 	var capHits atomic.Int32
 	srv := fakeServer(t, func(w http.ResponseWriter, r *http.Request) {
 		if ua := r.Header.Get("User-Agent"); !strings.HasPrefix(ua, "chusmeteo") {
@@ -218,5 +220,115 @@ func TestArrowAndPointAt(t *testing.T) {
 	}
 	if p.At(9).Temperature != 10 {
 		t.Error("fuera de rango debe devolver el punto actual")
+	}
+}
+
+func TestHasWx(t *testing.T) {
+	for wx, want := range map[string]bool{"TSGR": true, "TSRA GR": true, "+TSRA": false, "VCTS": false, "": false, "GS": true} {
+		if got := hasWx(wx, "GR") || hasWx(wx, "GS"); got != want {
+			t.Errorf("hasWx(%q) hail = %v", wx, got)
+		}
+	}
+	if !hasWx("VCTS", "TS") || hasWx("RA", "TS") {
+		t.Error("TS")
+	}
+}
+
+func TestGetStations(t *testing.T) {
+	srv := fakeServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("bbox") == "" {
+			t.Error("falta bbox")
+		}
+		fmt.Fprint(w, `[
+		 {"icaoId":"SAOC","name":"Villa Reynolds, C, AR","obsTime":1793476800,"wxString":"TSRA GR","rawOb":"r1","lat":-33.1,"lon":-64.3},
+		 {"icaoId":"SAOC","name":"Villa Reynolds, C, AR","obsTime":1793475900,"wxString":"TSGR RA","rawOb":"r0","lat":-33.1,"lon":-64.3},
+		 {"icaoId":"SACO","name":"Cordoba, X, AR","obsTime":1793476800,"wxString":null,"rawOb":"r2","lat":-31.3,"lon":-64.2}]`)
+	})
+	old := metarURL
+	t.Cleanup(func() { metarURL = old })
+	metarURL = srv.URL
+	st, err := GetStations(context.Background(), Location{Latitude: -31.4, Longitude: -64.2}, 2)
+	if err != nil || len(st) != 2 {
+		t.Fatalf("st=%+v err=%v", st, err)
+	}
+	if st[0].ICAO != "SACO" || st[0].Name != "Cordoba" || !st[0].HailAt.IsZero() {
+		t.Errorf("la más cercana: %+v", st[0])
+	}
+	if st[1].Raw != "r1" || st[1].HailAt.IsZero() || st[1].ThunderAt.IsZero() {
+		t.Errorf("la más lejana: %+v", st[1])
+	}
+}
+
+func TestHailRiskLowFreezingLevel(t *testing.T) {
+	// Caso real 31/10/2026 en Córdoba: chaparrones, CAPE ~800, isoterma ~3600 m. Cayó granizo.
+	if got := EstimateHailRisk(80, 800, 3600); got != HailModerate {
+		t.Errorf("chaparrón con isoterma baja = %v, quería MODERADO", got)
+	}
+	if got := EstimateHailRisk(80, 800, 4300); got != HailLow {
+		t.Errorf("con isoterma normal sigue BAJO, got %v", got)
+	}
+}
+
+func TestBoosted(t *testing.T) {
+	o := &HailOutlook{}
+	for i := 0; i < 6; i++ {
+		o.Hours = append(o.Hours, HailHour{Risk: HailLow})
+	}
+	now := time.Date(2026, 10, 31, 17, 15, 0, 0, time.UTC)
+	b := o.Boosted(now, []HailBoost{{Floor: HailModerate, Until: now.Add(2 * time.Hour), Reason: "x"}})
+	if b.Max != HailModerate || b.Hours[0].Risk != HailModerate || b.Hours[3].Risk != HailLow || len(b.Notes) != 1 {
+		t.Errorf("boosted: %+v", b)
+	}
+	if o.Hours[0].Risk != HailLow {
+		t.Error("el original no se debe modificar")
+	}
+	if o.Boosted(now, nil) != o {
+		t.Error("sin boosts devuelve el mismo")
+	}
+}
+
+func TestRecentLinks(t *testing.T) {
+	now := time.Date(2026, 10, 31, 19, 0, 0, 0, time.Local)
+	got := recentLinks([]string{
+		"https://x/feeds/CAP/avisocortoplazo/2026_10_31_1808_cap_es.xml",
+		"https://x/feeds/CAP/avisocortoplazo/2026_10_20_0800_cap_es.xml",
+		"https://x/feeds/CAP/sin-fecha.xml",
+	}, now)
+	if len(got) != 2 || !strings.Contains(got[0], "10_31") || !strings.Contains(got[1], "sin-fecha") {
+		t.Errorf("recentLinks = %v", got)
+	}
+}
+
+func TestFetchAlertsRateLimitedAndDiskCache(t *testing.T) {
+	old := capCacheDir
+	capCacheDir = t.TempDir()
+	t.Cleanup(func() { capCacheDir = old })
+
+	var limited atomic.Bool
+	srv := fakeServer(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/CAP/AR.php":
+			fmt.Fprint(w, `<rss><channel><item><link>/feeds/CAP/2099_01_01_0000.xml</link></item></channel></rss>`)
+		case limited.Load():
+			http.Error(w, "slow down", http.StatusTooManyRequests)
+		default:
+			fmt.Fprint(w, capXML("TORMENTAS - AVISO AMARILLO", "2099-01-01T00:00:00-03:00", cbaPoly, "Alert"))
+		}
+	})
+	smnIndexURL = srv.URL + "/CAP/AR.php"
+
+	if res, err := FetchAlerts(context.Background(), map[string]bool{}); err != nil || len(res.New) != 1 {
+		t.Fatalf("primera pasada: %v %v", res, err)
+	}
+	// Reinicio de la app (known vacío) con el SMN en 429: sale del disco.
+	limited.Store(true)
+	res, err := FetchAlerts(context.Background(), map[string]bool{})
+	if err != nil || len(res.New) != 1 {
+		t.Fatalf("desde el caché en disco: %v %v", res, err)
+	}
+	// Sin caché y con 429: error claro.
+	capCacheDir = t.TempDir()
+	if _, err := FetchAlerts(context.Background(), map[string]bool{}); !errors.Is(err, ErrRateLimited) {
+		t.Errorf("esperaba ErrRateLimited, got %v", err)
 	}
 }

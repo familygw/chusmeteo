@@ -74,8 +74,102 @@ func fetchHail(loc api.Location) tea.Cmd {
 	}
 }
 
+// obsState: observaciones METAR de aeropuertos cercanos a la ciudad elegida.
+type obsState struct {
+	st      []api.Station
+	loc     string // ciudad de la que son las observaciones
+	at      time.Time
+	tried   time.Time
+	loading bool
+	err     error
+}
+
+type obsMsg struct{ st []api.Station }
+type obsErrMsg struct{ err error }
+
+const (
+	obsTTL    = 10 * time.Minute
+	obsRadius = 2.0 // grados (~200 km)
+	hailNear  = 100 // km: hasta dónde un granizo observado cuenta como "cerca"
+	hailFresh = 90 * time.Minute
+)
+
+func (m Model) ensureObs() (Model, tea.Cmd) {
+	o := &m.obs
+	now := time.Now()
+	if m.state != stateReady || o.loading || now.Sub(o.at) < obsTTL || now.Sub(o.tried) < retryAfter {
+		return m, nil
+	}
+	o.loading, o.tried = true, now
+	loc := m.loc
+	return m, func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		st, err := api.GetStations(ctx, loc, obsRadius)
+		if err != nil {
+			return obsErrMsg{err}
+		}
+		return obsMsg{st}
+	}
+}
+
+// hailOutlook: el pronóstico de ICON subido con lo que el modelo no ve
+// (avisos del SMN y observaciones de aeropuertos cercanos).
+func (m Model) hailOutlook() *api.HailOutlook {
+	o := m.hail.outlook
+	if o == nil {
+		return nil
+	}
+	var boosts []api.HailBoost
+	city, _ := m.cityAlerts()
+	for _, a := range city {
+		if !a.Hail {
+			continue
+		}
+		floor := api.HailModerate
+		if a.Level >= api.LevelOrange {
+			floor = api.HailHigh
+		}
+		until := a.Expires
+		if until.IsZero() {
+			until = m.now.Add(3 * time.Hour)
+		}
+		boosts = append(boosts, api.HailBoost{Floor: floor, Until: until, Reason: "aviso SMN " + strings.ToLower(a.Level.String())})
+		break // con el más grave alcanza (cityAlerts ya viene ordenado)
+	}
+	for _, s := range m.obs.st {
+		if s.DistKm > hailNear {
+			continue
+		}
+		switch {
+		case !s.HailAt.IsZero() && m.now.Sub(s.HailAt) <= hailFresh:
+			boosts = append(boosts, api.HailBoost{Floor: api.HailHigh, Until: m.now.Add(2 * time.Hour), Reason: "granizo observado en " + s.ICAO})
+		case !s.ThunderAt.IsZero() && m.now.Sub(s.ThunderAt) <= hailFresh:
+			boosts = append(boosts, api.HailBoost{Floor: api.HailModerate, Until: m.now.Add(2 * time.Hour), Reason: "tormenta observada en " + s.ICAO})
+		}
+	}
+	return o.Boosted(m.now, boosts)
+}
+
+// hailObserved: estación cercana que reportó granizo hace poco.
+func (m Model) hailObserved() (api.Station, bool) {
+	for _, s := range m.obs.st {
+		if s.DistKm <= hailNear && !s.HailAt.IsZero() && m.now.Sub(s.HailAt) <= hailFresh {
+			return s, true
+		}
+	}
+	return api.Station{}, false
+}
+
 // ensureAlerts: los avisos se actualizan en segundo plano, en cualquier vista.
 func (m Model) ensureAlerts() (Model, tea.Cmd) {
+	var c1, c2 tea.Cmd
+	m, c1 = m.ensureSMN()
+	m, c2 = m.ensureObs()
+	return m, tea.Batch(c1, c2)
+}
+
+func (m Model) ensureSMN() (Model, tea.Cmd) {
 	a := &m.alerts
 	now := time.Now()
 	if a.loading || now.Sub(a.at) < alertsTTL || now.Sub(a.tried) < retryAfter {
@@ -100,7 +194,11 @@ func (m Model) onAlerts(res *api.AlertsResult) Model {
 			next[u] = a
 		}
 	}
-	m.alerts = alertState{byURL: next, current: res.Current, at: time.Now(), tried: m.alerts.tried}
+	at := time.Now()
+	if res.Limited { // quedaron avisos por bajar: reintentamos en 3 min, no en 10
+		at = at.Add(-alertsTTL + 3*time.Minute)
+	}
+	m.alerts = alertState{byURL: next, current: res.Current, at: at, tried: m.alerts.tried}
 	return m
 }
 
@@ -126,8 +224,12 @@ func (m Model) cityAlerts() (city, all []*api.Alert) {
 // alertBadge: indicador para la barra superior ("" si no hay nada que avisar).
 func (m Model) alertBadge(short bool) string {
 	city, all := m.cityAlerts()
-	hailRisk := m.hail.outlook != nil && m.hail.outlook.Max >= api.HailModerate
+	ho := m.hailOutlook()
+	hailRisk := ho != nil && ho.Max >= api.HailModerate
 	if countHail(city) > 0 {
+		hailRisk = true
+	}
+	if _, ok := m.hailObserved(); ok {
 		hailRisk = true
 	}
 	blink := m.now.Second()%2 == 0
@@ -232,9 +334,37 @@ func (m Model) popupLines(w int) []string {
 	}
 	lines = append(lines, pad(""))
 
+	// METAR
+	lines = append(lines, hi("OBSERVADO · AEROPUERTOS CERCANOS (METAR)"))
+	switch {
+	case len(m.obs.st) == 0 && m.obs.err != nil:
+		lines = append(lines, text("Sin datos: "+m.obs.err.Error()))
+	case len(m.obs.st) == 0:
+		lines = append(lines, text("Sin estaciones cercanas en las últimas horas."))
+	default:
+		for i, s := range m.obs.st {
+			if i == 3 {
+				break
+			}
+			wx := s.Weather
+			if wx == "" {
+				wx = "sin fenómenos"
+			}
+			hail := ""
+			if !s.HailAt.IsZero() {
+				hail = popupHi.Render(" ▲GRANIZO " + ago(m.now, s.HailAt))
+			} else if !s.ThunderAt.IsZero() {
+				hail = popupText.Render(" tormenta " + ago(m.now, s.ThunderAt))
+			}
+			head := fmt.Sprintf("%s %s · %.0f km · %s · %s", s.ICAO, s.Name, s.DistKm, s.Time.Format("15:04"), wx)
+			lines = append(lines, pad(popupText.Render(truncate(head, w-lipgloss.Width(hail)))+hail))
+		}
+	}
+	lines = append(lines, pad(""))
+
 	// ICON
 	lines = append(lines, hi("MODELO ICON · PRÓXIMAS 24 H (estimación)"))
-	o := m.hail.outlook
+	o := m.hailOutlook()
 	switch {
 	case o == nil && m.hail.err != nil:
 		lines = append(lines, text("Sin datos: "+m.hail.err.Error()))
@@ -251,6 +381,9 @@ func (m Model) popupLines(w int) []string {
 				}
 				lines = append(lines, pad(popupText.Render("  "+e.Label(ref)+" ")+riskStyle[e.Peak].Render(" "+e.Peak.String()+" ")))
 			}
+			if cape := o.PeakCAPE(); cape > 0 {
+				lines = append(lines, text(fmt.Sprintf("Tamaño probable: %s (CAPE %.0f J/kg; chico no es inofensivo)", api.HailSize(cape), cape)))
+			}
 		}
 		explicit := "no"
 		if o.Explicit {
@@ -265,6 +398,9 @@ func (m Model) popupLines(w int) []string {
 		}
 		if city, _ := m.cityAlerts(); o.Max < api.HailModerate && countHail(city) > 0 {
 			lines = append(lines, hi("Ojo: aviso SMN con granizo en tu ciudad; el modelo lo subestima."))
+		}
+		if len(o.Notes) > 0 {
+			lines = append(lines, hi("Subido por: "+strings.Join(o.Notes, ", ")))
 		}
 		lines = append(lines,
 			text("Granizo explícito en ICON (códigos 96/99): "+explicit),
@@ -297,6 +433,15 @@ func stripLevel(ev string) string {
 		return ev[:i]
 	}
 	return ev
+}
+
+// ago: "hace 25 min" / "hace 2 h".
+func ago(now, t time.Time) string {
+	d := max(now.Sub(t), 0)
+	if d < time.Hour {
+		return fmt.Sprintf("hace %d min", int(d.Minutes()))
+	}
+	return fmt.Sprintf("hace %d h", int(d.Hours()))
 }
 
 // untilLabel: "15:04", "mañana 08:59" o "02/11 08:59" según el día respecto de now.

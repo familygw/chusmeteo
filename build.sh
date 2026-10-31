@@ -36,7 +36,7 @@ for t in "${TARGETS[@]}"; do
 	stage="$DIST/$name"
 	mkdir -p "$stage"
 	CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" \
-		go build -trimpath -ldflags "-s -w -X main.version=$VERSION" -o "$stage/$BIN$ext" "$PKG"
+		go build -trimpath -ldflags "-s -w -X chusmeteo/internal/ui.Version=$VERSION" -o "$stage/$BIN$ext" "$PKG"
 	cp README.md "$stage/"
 
 	if [[ "$os" == windows ]]; then

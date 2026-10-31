@@ -24,6 +24,7 @@ import (
 
 	"chusmeteo/internal/api"
 	"chusmeteo/internal/fx"
+	"chusmeteo/internal/locate"
 	"chusmeteo/internal/sdr"
 
 	"github.com/charmbracelet/bubbles/spinner"
@@ -117,6 +118,7 @@ type Model struct {
 
 	// granizo: avisos del SMN y pronóstico del modelo ICON
 	alerts     alertState
+	obs        obsState
 	hail       hailState
 	showAlerts bool
 
@@ -211,7 +213,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.updated = time.Now()
 		m.gen++
 		// Con la ubicación confirmada, pedimos el granizo de ICON para ese punto.
-		return m, tea.Batch(scheduleRefresh(m.gen), fetchHail(msg.loc))
+		if m.obs.loc != msg.loc.Name {
+			m.obs = obsState{loc: msg.loc.Name}
+		}
+		m, ocmd := m.ensureObs()
+		return m, tea.Batch(scheduleRefresh(m.gen), fetchHail(msg.loc), ocmd)
 
 	case errMsg:
 		m.err = msg.err
@@ -261,6 +267,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case satDoneMsg:
 		m.sat.cancel, m.sat.err = nil, msg.err
+		return m, nil
+
+	case obsMsg:
+		m.obs = obsState{st: msg.st, loc: m.obs.loc, at: time.Now(), tried: m.obs.tried}
+		return m, nil
+
+	case obsErrMsg:
+		m.obs.loading, m.obs.err = false, msg.err
 		return m, nil
 
 	case alertsErrMsg:
@@ -327,6 +341,9 @@ func (m Model) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.view == viewSat {
 			return m.toggleCapture()
 		}
+	case "g": // usar la ubicación de la compu
+		m.city = locate.Token
+		return m.reload()
 	case "f3", "/", "c":
 		m.searching = true
 		m.showHelp = false
@@ -424,7 +441,7 @@ func fetchWeather(city string) tea.Cmd {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 
-		loc, err := api.Geocode(ctx, city)
+		loc, err := geocode(ctx, city)
 		if err != nil {
 			return errMsg{err}
 		}
@@ -434,6 +451,14 @@ func fetchWeather(city string) tea.Cmd {
 		}
 		return weatherMsg{loc: loc, fc: fc}
 	}
+}
+
+// geocode resuelve el nombre a coordenadas; locate.Token usa la ubicación de la compu.
+func geocode(ctx context.Context, city string) (api.Location, error) {
+	if city == locate.Token {
+		return locate.Here(ctx)
+	}
+	return api.Geocode(ctx, city)
 }
 
 func clockTick() tea.Cmd {

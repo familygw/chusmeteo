@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 
+	"chusmeteo/internal/locate"
 	"chusmeteo/internal/sdr"
 	"chusmeteo/internal/ui"
 
@@ -20,12 +21,16 @@ func main() {
 	city := flag.String("city", "Córdoba, AR", "ciudad a mostrar (\"Ciudad\" o \"Ciudad, CC\")")
 	view := flag.String("view", "clima", "vista inicial: clima | mapa | radar")
 	noFX := flag.Bool("nofx", false, "sin efecto de recepción del satélite")
+	gps := flag.Bool("gps", false, "usar la ubicación de esta compu (macOS, requiere CoreLocationCLI)")
 	hardcore := flag.Bool("hardcore", false, "agrega la vista SAT: recibe Meteor-M LRPT con un RTL-SDR (requiere satdump)")
 	cfg := sdr.DefaultConfig()
 	flag.StringVar(&cfg.Dir, "lrpt-dir", cfg.Dir, "directorio donde SatDump guarda las imágenes")
 	flag.Float64Var(&cfg.FreqMHz, "lrpt-freq", cfg.FreqMHz, "frecuencia en MHz (Meteor-M2 3: 137.9, Meteor-M2 4: 137.1)")
 	flag.Float64Var(&cfg.Gain, "lrpt-gain", cfg.Gain, "ganancia del RTL-SDR en dB")
 	flag.Parse()
+	if *gps {
+		*city = locate.Token
+	}
 
 	v, ok := ui.ParseView(*view)
 	if !ok || (v == ui.ViewSat && !*hardcore) {

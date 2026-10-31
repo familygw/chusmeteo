@@ -52,8 +52,9 @@ type HailOutlook struct {
 	MaxCAPE  float64
 	MinFZL   float64 // isoterma 0 °C más baja del período
 	Explicit bool
-	Crossed  bool // se pudo contrastar con GFS
-	Disagree bool // GFS contradice a ICON en alguna hora de riesgo
+	Crossed  bool     // se pudo contrastar con GFS
+	Notes    []string // por qué se subió el riesgo (avisos, observaciones)
+	Disagree bool     // GFS contradice a ICON en alguna hora de riesgo
 }
 
 // Window devuelve la primera y la última hora con riesgo >= r (ok=false si no hay).
@@ -149,12 +150,13 @@ func EstimateHail(in HailInputs) HailRisk {
 	if freezingLevel > 4600 && r > HailNone {
 		r--
 	}
-	// Isoterma baja con buena energía: sube un escalón.
-	if freezingLevel > 0 && freezingLevel < 3500 && cape >= 1000 && r < HailHigh {
+	// Isoterma baja con algo de energía: el granizo chico llega al suelo.
+	// (31/10/2026: cayó granizo en Córdoba con CAPE ~800 J/kg e isoterma ~3600 m.)
+	if freezingLevel > 0 && freezingLevel < 3800 && cape >= 600 && r < HailHigh {
 		r++
 	}
-	// Sin tormenta en el pronóstico, como mucho "bajo".
-	if code < 95 && r > HailLow {
+	// Sin tormenta ni chaparrones en el pronóstico, como mucho "bajo".
+	if code < 80 && r > HailLow {
 		r--
 	}
 	// Poca cizalladura: tormentas de masa de aire, de vida corta y granizo chico.
@@ -294,4 +296,62 @@ func deref[T any](s []*T, i int) T {
 		return zero
 	}
 	return *s[i]
+}
+
+// HailBoost sube el riesgo a un piso hasta cierto momento, por algo que el modelo no ve.
+type HailBoost struct {
+	Floor  HailRisk
+	Until  time.Time
+	Reason string
+}
+
+// Boosted devuelve una copia con el riesgo subido (nunca bajado) según los boosts.
+// Las horas del modelo son locales de la ciudad, así que contamos horas desde
+// la actual en vez de comparar relojes.
+func (o *HailOutlook) Boosted(now time.Time, boosts []HailBoost) *HailOutlook {
+	if o == nil || len(boosts) == 0 {
+		return o
+	}
+	c := *o
+	c.Hours = append([]HailHour(nil), o.Hours...)
+	c.Notes = nil
+	c.Max = 0
+	start := now.Truncate(time.Hour)
+	for _, b := range boosts {
+		n := int(math.Ceil(b.Until.Sub(start).Hours()))
+		for i := range c.Hours {
+			if i < n {
+				c.Hours[i].Risk = max(c.Hours[i].Risk, b.Floor)
+			}
+		}
+		c.Notes = append(c.Notes, b.Reason)
+	}
+	for _, h := range c.Hours {
+		c.Max = max(c.Max, h.Risk)
+	}
+	return &c
+}
+
+// PeakCAPE: el CAPE más alto entre las horas con riesgo (0 si no hay ninguna).
+func (o *HailOutlook) PeakCAPE() float64 {
+	var peak float64
+	for _, h := range o.Hours {
+		if h.Risk >= HailLow {
+			peak = max(peak, h.CAPE)
+		}
+	}
+	return peak
+}
+
+// HailSize estima el tamaño probable según la energía. Es orientativo: con CAPE
+// baja el granizo suele ser chico (pero puede caer en cantidad); el grande
+// necesita corrientes ascendentes fuertes.
+func HailSize(cape float64) string {
+	switch {
+	case cape < 1500:
+		return "chico"
+	case cape < 2500:
+		return "mediano"
+	}
+	return "grande"
 }

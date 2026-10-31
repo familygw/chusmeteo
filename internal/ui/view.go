@@ -6,15 +6,18 @@ import (
 	"time"
 
 	"chusmeteo/internal/api"
+	"chusmeteo/internal/locate"
 	"chusmeteo/internal/render"
 
 	"github.com/charmbracelet/lipgloss"
 )
 
+// Version se pisa al compilar: -ldflags "-X chusmeteo/internal/ui.Version=v1.2.3".
+var Version = "v0.8"
+
 const (
-	version = "v0.6"
-	minW    = 72
-	minH    = 24
+	minW = 72
+	minH = 24
 )
 
 var weekdays = [...]string{"DOM", "LUN", "MAR", "MIÉ", "JUE", "VIE", "SÁB"}
@@ -95,7 +98,7 @@ func clampLines(s string, n int) string {
 var tabNames = [viewCount]string{"CLIMA", "MAPA", "RADAR"}
 
 func (m Model) headerView() string {
-	left := barStyle.Render(" ☼ CHUSMETEO " + version + " ")
+	left := barStyle.Render(" ☼ CHUSMETEO " + Version + " ")
 	right := barStyle.Render(weekdays[m.now.Weekday()] + " " + m.now.Format("02/01/2006 15:04:05") + " ")
 	// Indicador de avisos/granizo: versión corta si no entra.
 	tabsW := 26
@@ -296,7 +299,7 @@ func (m Model) loadingView() string {
 		"",
 		m.spin.View() + titleStyle.Render("  SINTONIZANDO SATÉLITE..."),
 		"",
-		labelStyle.Render("Buscando: ") + valueStyle.Render(m.city),
+		labelStyle.Render("Buscando: ") + valueStyle.Render(strings.Replace(m.city, locate.Token, "tu ubicación", 1)),
 		"",
 	}
 	return base.Width(m.contentW()).Render(strings.Join(lines, "\n"))
@@ -325,6 +328,7 @@ func (m Model) helpView() string {
 		key("F1  ?", "Mostrar / ocultar esta ayuda"),
 		key("F2  Tab", "Cambiar de vista (o 1 clima · 2 mapa · 3 radar)"),
 		key("F3  /  c", "Buscar otra ciudad (\"Ciudad, AR\" filtra por país)"),
+		key("g", "Usar la ubicación de esta compu (macOS, CoreLocationCLI)"),
 		key("F4  !", "Avisos del SMN y riesgo de granizo (modelo ICON)"),
 		key("F5  r", "Refrescar ahora (clima 15 min, mapa 30, radar 10)"),
 		key("a", "Repetir la recepción del satélite"),
@@ -359,7 +363,7 @@ func truncate(s string, n int) string {
 
 // hailSummary: una línea con el riesgo de granizo según ICON.
 func (m Model) hailSummary() string {
-	o := m.hail.outlook
+	o := m.hailOutlook()
 	if o == nil {
 		if m.hail.err != nil {
 			return base.Render("sin datos de ICON")
@@ -382,7 +386,7 @@ func (m Model) hailSummary() string {
 // riskStrip: una fila de colores con el riesgo de granizo por hora, alineada
 // con las barras del gráfico ("" si no hay datos de ICON).
 func (m Model) riskStrip(hours []api.Hour, w int) string {
-	o := m.hail.outlook
+	o := m.hailOutlook()
 	if o == nil || len(hours) == 0 {
 		return ""
 	}
