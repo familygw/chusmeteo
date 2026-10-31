@@ -1,0 +1,5 @@
+bin/
+/chusmeteo
+/dist
+*.exe
+.DS_Store
