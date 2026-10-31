@@ -217,7 +217,7 @@ func (m Model) popupLines(w int) []string {
 		lines = append(lines, pad(tag+popupText.Render(" "+truncate(ev, room))+hail))
 		until := ""
 		if !a.Expires.IsZero() {
-			until = "hasta " + a.Expires.Local().Format("15:04") + " · "
+			until = "hasta " + untilLabel(a.Expires.Local(), m.now) + " · "
 		}
 		lines = append(lines, dim("  "+until+a.AreaDesc))
 	}
@@ -264,7 +264,7 @@ func (m Model) popupLines(w int) []string {
 			lines = append(lines, text("Contrastado con GFS: no lo contradice."))
 		}
 		if city, _ := m.cityAlerts(); o.Max < api.HailModerate && countHail(city) > 0 {
-			lines = append(lines, popupHi.Render("Ojo: hay aviso SMN con granizo en tu ciudad; el modelo lo subestima."))
+			lines = append(lines, hi("Ojo: aviso SMN con granizo en tu ciudad; el modelo lo subestima."))
 		}
 		lines = append(lines,
 			text("Granizo explícito en ICON (códigos 96/99): "+explicit),
@@ -297,6 +297,21 @@ func stripLevel(ev string) string {
 		return ev[:i]
 	}
 	return ev
+}
+
+// untilLabel: "15:04", "mañana 08:59" o "02/11 08:59" según el día respecto de now.
+func untilLabel(t, now time.Time) string {
+	y, mo, d := now.Date()
+	today := time.Date(y, mo, d, 0, 0, 0, 0, now.Location())
+	t = t.In(now.Location())
+	days := int(time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, now.Location()).Sub(today).Hours() / 24)
+	switch {
+	case days <= 0:
+		return t.Format("15:04")
+	case days == 1:
+		return "mañana " + t.Format("15:04")
+	}
+	return t.Format("02/01 15:04")
 }
 
 // sentence: "TORMENTAS FUERTES" -> "Tormentas fuertes" (el SMN escribe en mayúsculas).

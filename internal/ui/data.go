@@ -24,10 +24,31 @@ const (
 // gridState: datos del mapa de temperaturas.
 type gridState struct {
 	pts     []api.PointWeather // grilla + ciudades (las ciudades van al final)
+	off     int                // horas hacia adelante (0 = ahora)
 	at      time.Time
 	tried   time.Time
 	loading bool
 	err     error
+}
+
+// points devuelve los puntos como estarán dentro de `off` horas.
+func (g gridState) points() []api.PointWeather {
+	if g.off == 0 {
+		return g.pts
+	}
+	out := make([]api.PointWeather, len(g.pts))
+	for i, p := range g.pts {
+		out[i] = p.At(g.off)
+	}
+	return out
+}
+
+// maxOff: última hora pronosticada disponible.
+func (g gridState) maxOff() int {
+	if len(g.pts) == 0 {
+		return 0
+	}
+	return max(len(g.pts[0].Hourly)-1, 0)
 }
 
 // cities devuelve sólo los puntos de las ciudades de referencia.
@@ -36,7 +57,11 @@ func (g gridState) cities() []api.PointWeather {
 	if len(g.pts) < n {
 		return nil
 	}
-	return g.pts[len(g.pts)-n:] // un sub-slice: no copia, apunta al mismo array
+	out := make([]api.PointWeather, n)
+	for i, p := range g.pts[len(g.pts)-n:] {
+		out[i] = p.At(g.off)
+	}
+	return out
 }
 
 // radarState: frames del radar y reproducción.
@@ -143,6 +168,8 @@ func (m Model) ensureData() (Model, tea.Cmd) {
 			g.loading, g.tried = true, now
 			return m, tea.Batch(fetchGrid(), m.spin.Tick)
 		}
+	case viewSat:
+		return m.ensureSat()
 	case viewRadar:
 		r := &m.radar
 		stale := r.idx == nil || now.Sub(r.at) > radarTTL

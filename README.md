@@ -9,12 +9,13 @@ espacio que tenga. Cuanto más grande la ventana, más detalle en pixel art.
 Tres vistas:
 
 1. **Clima**: condiciones actuales, pronóstico de hasta 7 días y, si hay alto, un gráfico de las próximas 24 horas.
-2. **Mapa**: Argentina coloreada por temperatura actual, con 12 ciudades de referencia.
+2. **Mapa**: Argentina coloreada por temperatura, con 12 ciudades de referencia y la dirección del viento en cada una (`↗`). Con `←` `→` se navega el pronóstico hora a hora (hasta +23 h).
 3. **Radar**: precipitación de las últimas 2 horas, animada.
 
 Y con **F4**, un popup al estilo de los diálogos de Norton Commander con todo lo
 que hay sobre **granizo**: los avisos vigentes del SMN para tu ciudad (y cuántos hay
-en el resto del país) y el riesgo para las próximas 24 h según el modelo ICON. Si hay
+en el resto del país) y el riesgo de las próximas 24 h según el modelo ICON, contrastado
+con GFS. Cada tramo de riesgo indica el día ("hoy 15–18 h", "mañana 14 h"). Si hay
 algo, la barra superior titila con `⚠ AVISO SMN` o `⚠ GRANIZO?`.
 
 Las vistas de mapa "se reciben" como en una PC de los 90 conectada a una antena:
@@ -42,7 +43,16 @@ go mod tidy                  # la primera vez
 go run ./cmd/chusmeteo
 go run ./cmd/chusmeteo -city "Mendoza" -view mapa
 go run ./cmd/chusmeteo -view radar -nofx    # sin efecto de recepción
+go run ./cmd/chusmeteo -hardcore            # agrega la vista SAT (RTL-SDR)
 ```
+
+**Modo hardcore.** Con `-hardcore` aparece la pestaña `4 SAT`: recibe imágenes reales de
+Meteor-M (LRPT, ~137 MHz) con un RTL-SDR y una antena (V-dipolo o QFH). Requiere
+[SatDump](https://github.com/SatDump/SatDump) en el `PATH`. En esa vista, `s` inicia o
+detiene `satdump live meteor_m2-x_lrpt ...` (una pasada dura ~15 min) y la app muestra la
+imagen más nueva que deje en `-lrpt-dir` (por defecto el directorio de caché del usuario).
+Opciones: `-lrpt-freq` (137.9 para Meteor-M2 3, 137.1 para Meteor-M2 4) y `-lrpt-gain`.
+No hay pronóstico de pasadas: consultá cuándo pasa el satélite en otra herramienta.
 
 O con `make`: `make run`, `make test`, `make build`, `make build-all`.
 
@@ -54,7 +64,7 @@ O con `make`: `make run`, `make test`, `make build`, `make build-all`.
 | `F5` / `r`       | Refrescar ahora                                     |
 | `a`              | Repetir la recepción del satélite                   |
 | `Espacio`        | Radar: play / pausa                                 |
-| `←` `→`          | Radar: cuadro anterior / siguiente                  |
+| `←` `→`          | Mapa: hora del pronóstico · Radar: cuadro anterior / siguiente |
 | `Esc`            | Saltear la recepción · cerrar ayuda                 |
 | `F1` / `?`       | Ayuda                                               |
 | `F10` / `q`      | Salir                                               |
@@ -77,7 +87,8 @@ internal/
             data/sudamerica.json lo genera tools/nedata/extract.py
   render/   lienzo de medios bloques (▀), paletas, tramado Bayer, mapas, gráfico horario
   fx/       efecto de recepción APT: barrido, estática, sincronismo, Doppler
-  ui/       modelo/Update (model.go), datos y comandos (data.go), vistas (view.go, mapview.go)
+  ui/       modelo/Update (model.go), datos y comandos (data.go), vistas (view.go, mapview.go, satview.go)
+  sdr/      modo hardcore: lanza SatDump con el RTL-SDR y busca la imagen más nueva
 ```
 
 Cada paquete tiene sus tests. Los de `api` usan `httptest` (servidores HTTP falsos),
@@ -132,6 +143,15 @@ otra con tramado ordenado Bayer 4x4, como los gráficos de 16 colores de los 90.
   pocos modelos que pronostican granizo explícito (códigos WMO 96/99). Además se piden
   CAPE e isoterma de 0 °C y se combinan en un riesgo NULO/BAJO/MODERADO/ALTO
   (`EstimateHailRisk`). Es una heurística propia, no un producto oficial.
+  El riesgo también pondera la cizalladura (viento a 500 hPa menos viento a 10 m) y la
+  precipitación pronosticada, y se contrasta con el CAPE de GFS: si GFS no ve energía,
+  baja un escalón. Los tramos de riesgo se agrupan con día explícito (`Episodes`).
+
+**v0.7, viento y pronóstico en el mapa.** La grilla pide, además de `current`, 24 horas de
+`hourly` (temperatura, precipitación y viento) en la misma llamada multi-coordenada.
+`PointWeather.At(h)` devuelve el punto "dentro de h horas" y la vista de mapa lo usa para
+colorear y para la tabla de ciudades. `api.Arrow` convierte la dirección (de dónde sopla)
+en una flecha hacia dónde va, y se muestra en el mapa y en la vista de clima.
 
 En la vista de clima aparece una línea `GRANIZO` y, bajo el gráfico de 24 h, una franja con
 el riesgo por hora. En el radar, el nivel más alto se llama "Intensa (posible granizo)":
@@ -175,8 +195,13 @@ Detalles de Go que aparecen en el código y conviene mirar:
 - [x] **v0.4** efecto de recepción APT
 - [x] **v0.5** responsive, geografía real (provincias y vecinos), tramado, gráfico de 24 h
 - [x] **v0.6** granizo: avisos del SMN (CAP) + riesgo según ICON, popup con F4
-- [ ] Ideas: zoom a una región en terminales grandes, viento con flechas, pronóstico en el mapa
-  (`hourly` en vez de `current`), alertas del SMN, modo "hardcore" con RTL-SDR + Meteor-M LRPT.
+- [x] **v0.7** viento con flechas, pronóstico horario en el mapa, granizo contrastado con GFS
+- [x] **v0.8** modo hardcore: vista SAT con RTL-SDR + Meteor-M LRPT (`-hardcore`)
+- [ ] Ideas:
+  - zoom a una región en terminales grandes
+  - avisos del resto del país con *drill down*: lista de avisos vigentes por provincia y detalle de cada uno
+  - avisos vencidos del día (historial), para ver qué pasó aunque ya no estén vigentes
+  - predicción de pasadas de Meteor-M (TLE + SGP4) para saber cuándo capturar
 
 ## Datos y atribución
 

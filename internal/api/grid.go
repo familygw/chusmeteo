@@ -16,7 +16,28 @@ type PointWeather struct {
 	geo.LatLon
 	Temperature float64
 	WeatherCode int
-	Precip      float64 // mm en la última hora
+	Precip      float64     // mm en la última hora
+	Wind        float64     // km/h
+	WindDir     float64     // grados de donde sopla
+	Hourly      []PointHour // desde la hora actual; vacío si no llegó
+}
+
+// PointHour es el pronóstico de un punto para una hora.
+type PointHour struct {
+	Temperature float64
+	Precip      float64
+	Wind        float64
+	WindDir     float64
+}
+
+// At devuelve el punto como se verá dentro de h horas (h=0: ahora).
+func (p PointWeather) At(h int) PointWeather {
+	if h <= 0 || h >= len(p.Hourly) {
+		return p
+	}
+	x := p.Hourly[h]
+	p.Temperature, p.Precip, p.Wind, p.WindDir = x.Temperature, x.Precip, x.Wind, x.WindDir
+	return p
 }
 
 // GetGrid pide el clima actual para muchas coordenadas en UNA sola llamada.
@@ -36,7 +57,9 @@ func GetGrid(ctx context.Context, pts []geo.LatLon) ([]PointWeather, error) {
 	q := url.Values{}
 	q.Set("latitude", strings.Join(lats, ","))
 	q.Set("longitude", strings.Join(lons, ","))
-	q.Set("current", "temperature_2m,weather_code,precipitation")
+	q.Set("current", "temperature_2m,weather_code,precipitation,wind_speed_10m,wind_direction_10m")
+	q.Set("hourly", "temperature_2m,precipitation,wind_speed_10m,wind_direction_10m")
+	q.Set("forecast_hours", "24")
 	q.Set("timezone", "auto")
 
 	type item struct {
@@ -44,7 +67,15 @@ func GetGrid(ctx context.Context, pts []geo.LatLon) ([]PointWeather, error) {
 			Temperature float64 `json:"temperature_2m"`
 			WeatherCode int     `json:"weather_code"`
 			Precip      float64 `json:"precipitation"`
+			Wind        float64 `json:"wind_speed_10m"`
+			WindDir     float64 `json:"wind_direction_10m"`
 		} `json:"current"`
+		Hourly struct {
+			Temperature []*float64 `json:"temperature_2m"`
+			Precip      []*float64 `json:"precipitation"`
+			Wind        []*float64 `json:"wind_speed_10m"`
+			WindDir     []*float64 `json:"wind_direction_10m"`
+		} `json:"hourly"`
 	}
 
 	// Con una sola coordenada la API devuelve un objeto, no un array.
@@ -76,6 +107,17 @@ func GetGrid(ctx context.Context, pts []geo.LatLon) ([]PointWeather, error) {
 			Temperature: it.Current.Temperature,
 			WeatherCode: it.Current.WeatherCode,
 			Precip:      it.Current.Precip,
+			Wind:        it.Current.Wind,
+			WindDir:     it.Current.WindDir,
+		}
+		h := it.Hourly
+		for j := range h.Temperature {
+			out[i].Hourly = append(out[i].Hourly, PointHour{
+				Temperature: deref(h.Temperature, j),
+				Precip:      deref(h.Precip, j),
+				Wind:        deref(h.Wind, j),
+				WindDir:     deref(h.WindDir, j),
+			})
 		}
 	}
 	return out, nil

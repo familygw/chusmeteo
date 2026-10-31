@@ -12,6 +12,7 @@ import (
 
 	"chusmeteo/internal/api"
 	"chusmeteo/internal/geo"
+	"chusmeteo/internal/sdr"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -372,4 +373,35 @@ func TestDumpView(t *testing.T) {
 		m.showAlerts = true
 	}
 	t.Log("\n" + m.View())
+}
+
+func TestSatView(t *testing.T) {
+	img := image.NewRGBA(image.Rect(0, 0, 200, 600))
+	for y := 0; y < 600; y++ {
+		for x := 0; x < 200; x++ {
+			img.Set(x, y, color.RGBA{uint8(x), uint8(y / 3), 80, 255})
+		}
+	}
+	for _, size := range sizes {
+		m := fakeModel(size[0], size[1], Options{View: viewSat, Hardcore: true, SDR: sdr.DefaultConfig()})
+		if out := m.View(); !strings.Contains(out, "SIN SEÑAL") && size[0] >= 100 {
+			t.Errorf("%dx%d: falta SIN SEÑAL", size[0], size[1])
+		}
+		m, _ = send(m, satImgMsg{img: img, path: "/tmp/x.png", mod: time.Now()})
+		out := m.View()
+		if w := lipgloss.Width(out); w > size[0] {
+			t.Errorf("%dx%d: ancho %d", size[0], size[1], w)
+		}
+		if h := lipgloss.Height(out); h != size[1] {
+			t.Errorf("%dx%d: alto %d", size[0], size[1], h)
+		}
+	}
+	m := fakeModel(120, 40, Options{Hardcore: true})
+	if m, _ = send(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("4")}); m.view != viewSat {
+		t.Error("la tecla 4 debería ir a la vista satélite")
+	}
+	m = fakeModel(120, 40, Options{})
+	if m, _ = send(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("4")}); m.view == viewSat {
+		t.Error("sin -hardcore no hay vista satélite")
+	}
 }

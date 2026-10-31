@@ -24,6 +24,7 @@ import (
 
 	"chusmeteo/internal/api"
 	"chusmeteo/internal/fx"
+	"chusmeteo/internal/sdr"
 
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textinput"
@@ -48,7 +49,12 @@ const (
 	viewMap
 	viewRadar
 	viewCount // truco: la última constante cuenta cuántas hay
+
+	viewSat = viewCount // sólo con -hardcore; fuera de la cuenta para no afectar al resto
 )
+
+// ViewSat es la vista del modo hardcore (para el flag -view).
+const ViewSat = viewSat
 
 // ParseView traduce el flag -view. Devuelve false si no lo reconoce.
 func ParseView(s string) (View, bool) {
@@ -59,14 +65,18 @@ func ParseView(s string) (View, bool) {
 		return viewMap, true
 	case "radar", "3":
 		return viewRadar, true
+	case "satelite", "sat", "4":
+		return viewSat, true
 	}
 	return viewWeather, false
 }
 
 // Options son las opciones de línea de comandos.
 type Options struct {
-	View View
-	NoFX bool // sin efecto de recepción APT
+	View     View
+	NoFX     bool // sin efecto de recepción APT
+	Hardcore bool // RTL-SDR + Meteor-M LRPT
+	SDR      sdr.Config
 }
 
 // --- Mensajes del clima puntual ---
@@ -103,6 +113,7 @@ type Model struct {
 	// mapa y radar (vistas 2 y 3)
 	grid  gridState
 	radar radarState
+	sat   satState
 
 	// granizo: avisos del SMN y pronóstico del modelo ICON
 	alerts     alertState
@@ -244,6 +255,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case alertsMsg:
 		return m.onAlerts(msg.res), nil
 
+	case satImgMsg:
+		m.sat.img, m.sat.path, m.sat.mod = msg.img, msg.path, msg.mod
+		return m, nil
+
+	case satDoneMsg:
+		m.sat.cancel, m.sat.err = nil, msg.err
+		return m, nil
+
 	case alertsErrMsg:
 		m.alerts.loading, m.alerts.err = false, msg.err
 		return m, nil
@@ -297,11 +316,17 @@ func (m Model) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "f4", "!":
 		m.showAlerts = true
 	case "f2", "tab":
-		return m.switchView((m.view + 1) % viewCount)
+		return m.switchView((m.view + 1) % m.numViews())
 	case "shift+tab":
-		return m.switchView((m.view + viewCount - 1) % viewCount)
-	case "1", "2", "3":
-		return m.switchView(View(msg.String()[0] - '1')) // '2' - '1' = 1: aritmética de bytes
+		return m.switchView((m.view + m.numViews() - 1) % m.numViews())
+	case "1", "2", "3", "4":
+		if v := View(msg.String()[0] - '1'); v < m.numViews() { // '2' - '1' = 1: aritmética de bytes
+			return m.switchView(v)
+		}
+	case "s":
+		if m.view == viewSat {
+			return m.toggleCapture()
+		}
 	case "f3", "/", "c":
 		m.searching = true
 		m.showHelp = false
@@ -322,11 +347,14 @@ func (m Model) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m.startAnim()
 		}
 	case "left", "right", "h", "l":
+		dir := 1
+		if s := msg.String(); s == "left" || s == "h" {
+			dir = -1
+		}
+		if m.view == viewMap && m.rx == nil {
+			m.grid.off = max(0, min(m.grid.off+dir, m.grid.maxOff()))
+		}
 		if m.view == viewRadar && m.rx == nil {
-			dir := 1
-			if s := msg.String(); s == "left" || s == "h" {
-				dir = -1
-			}
 			m.radar.playing = false
 			m.radar.pos = m.radar.step(dir)
 		}

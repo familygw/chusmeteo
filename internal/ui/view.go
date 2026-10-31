@@ -53,6 +53,8 @@ func (m Model) View() string {
 		content = m.tempMapView()
 	case m.view == viewRadar:
 		content = m.radarView()
+	case m.view == viewSat:
+		content = m.satView()
 	case m.state == stateLoading:
 		content = m.loadingView()
 	case m.state == stateError:
@@ -97,6 +99,9 @@ func (m Model) headerView() string {
 	right := barStyle.Render(weekdays[m.now.Weekday()] + " " + m.now.Format("02/01/2006 15:04:05") + " ")
 	// Indicador de avisos/granizo: versión corta si no entra.
 	tabsW := 26
+	if m.opts.Hardcore {
+		tabsW += 12
+	}
 	badge := m.alertBadge(false)
 	fits := func() bool {
 		return lipgloss.Width(left)+lipgloss.Width(badge)+tabsW+lipgloss.Width(right)+2 <= m.width
@@ -110,7 +115,11 @@ func (m Model) headerView() string {
 	left += badge
 
 	var tabs strings.Builder
-	for i, name := range tabNames {
+	names := tabNames[:]
+	if m.opts.Hardcore {
+		names = append(names, "SAT")
+	}
+	for i, name := range names {
 		label := fmt.Sprintf(" %d %s ", i+1, name)
 		if View(i) == m.view {
 			tabs.WriteString(barKeyStyle.Render(label))
@@ -152,7 +161,7 @@ func (m Model) weatherView() string {
 	desc, sky := api.Describe(c.WeatherCode)
 
 	// Arriba: dibujo | datos principales | (si hay ancho) datos extra.
-	const artW, topH, dataW = 15, 8, 40
+	const artW, topH, dataW = 15, 8, 50
 	art := base.Width(artW).Height(topH).PaddingTop(1).
 		Render(artStyle.Render(bigIcon(sky, c.IsDay == 1)))
 
@@ -166,7 +175,7 @@ func (m Model) weatherView() string {
 		row("TEMPERATURA", tempStyle(c.Temperature).Render(fmt.Sprintf("%.1f°C", c.Temperature))+
 			dimStyle.Render(fmt.Sprintf("  (ST %.1f°C)", c.ApparentTemp))),
 		row("HUMEDAD", valueStyle.Render(fmt.Sprintf("%.0f %%", c.Humidity))),
-		row("VIENTO", valueStyle.Render(fmt.Sprintf("%s %.0f km/h", api.Compass(c.WindDirection), c.WindSpeed))),
+		row("VIENTO", valueStyle.Render(fmt.Sprintf("%s %s %.0f km/h", api.Arrow(c.WindDirection), api.Compass(c.WindDirection), c.WindSpeed))),
 		row("PRESIÓN", valueStyle.Render(fmt.Sprintf("%.0f hPa", c.Pressure))),
 		row("GRANIZO", m.hailSummary()),
 	}
@@ -320,14 +329,19 @@ func (m Model) helpView() string {
 		key("F5  r", "Refrescar ahora (clima 15 min, mapa 30, radar 10)"),
 		key("a", "Repetir la recepción del satélite"),
 		key("Esp  p", "Radar: play / pausa"),
-		key("←  →", "Radar: cuadro anterior / siguiente"),
+		key("←  →", "Mapa: hora del pronóstico · Radar: cuadro anterior / siguiente"),
+	}
+	if m.opts.Hardcore {
+		lines = append(lines, key("4  s", "Satélite: vista Meteor-M · s inicia / detiene la captura"))
+	}
+	lines = append(lines,
 		key("Esc", "Saltear recepción · cerrar ayuda · cancelar"),
 		key("F10 q", "Salir"),
 		"",
 		dimStyle.Render("Todo se adapta al tamaño de la terminal: agrandala para ver más detalle."),
 		dimStyle.Render("Si tu terminal no manda F1..F10, usá las teclas alternativas."),
 		dimStyle.Render("La recepción homenajea a NOAA-15, último satélite con APT (1998-2025)."),
-	}
+	)
 	return base.Width(m.contentW()).Render(strings.Join(lines, "\n"))
 }
 
@@ -348,9 +362,9 @@ func (m Model) hailSummary() string {
 	o := m.hail.outlook
 	if o == nil {
 		if m.hail.err != nil {
-			return dimStyle.Render("sin datos de ICON")
+			return base.Render("sin datos de ICON")
 		}
-		return dimStyle.Render("consultando ICON...")
+		return base.Render("consultando ICON...")
 	}
 	styles := map[api.HailRisk]lipgloss.Style{
 		api.HailNone:     valueStyle.Foreground(vgaLGreen),
@@ -362,7 +376,7 @@ func (m Model) hailSummary() string {
 	if eps := o.Episodes(max(o.Max, api.HailLow)); len(eps) > 0 && o.Max > api.HailNone {
 		out += valueStyle.Render(" " + eps[0].Label(o.Hours[0].Time))
 	}
-	return out + dimStyle.Render(" (ICON, F4)")
+	return out + base.Render(" · F4")
 }
 
 // riskStrip: una fila de colores con el riesgo de granizo por hora, alineada

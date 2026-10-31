@@ -59,6 +59,16 @@ func Describe(code int) (string, Sky) {
 	}
 }
 
+// Arrow dibuja hacia dónde VA el viento (deg es de dónde sopla, como en Compass).
+func Arrow(deg float64) string {
+	arrows := [...]string{"↑", "↗", "→", "↘", "↓", "↙", "←", "↖"}
+	i := int((deg+180+22.5)/45) % 8
+	if i < 0 {
+		i += 8
+	}
+	return arrows[i]
+}
+
 // Compass convierte grados (0-360) en un punto cardinal en castellano.
 func Compass(deg float64) string {
 	dirs := [...]string{"N", "NE", "E", "SE", "S", "SO", "O", "NO"} // array de tamaño fijo

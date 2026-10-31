@@ -207,3 +207,16 @@ func TestEpisodeLabel(t *testing.T) {
 		t.Errorf("episodios: %+v", eps)
 	}
 }
+
+func TestArrowAndPointAt(t *testing.T) {
+	if Arrow(0) != "↓" || Arrow(270) != "→" || Arrow(225) != "↗" {
+		t.Errorf("flechas: %s %s %s", Arrow(0), Arrow(270), Arrow(225))
+	}
+	p := PointWeather{Temperature: 10, Hourly: []PointHour{{Temperature: 10}, {Temperature: 15, Wind: 7}}}
+	if got := p.At(1); got.Temperature != 15 || got.Wind != 7 {
+		t.Errorf("At(1) = %+v", got)
+	}
+	if p.At(9).Temperature != 10 {
+		t.Error("fuera de rango debe devolver el punto actual")
+	}
+}

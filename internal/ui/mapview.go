@@ -4,7 +4,9 @@ import (
 	"fmt"
 	"math"
 	"strings"
+	"time"
 
+	"chusmeteo/internal/api"
 	"chusmeteo/internal/fx"
 	"chusmeteo/internal/geo"
 	"chusmeteo/internal/render"
@@ -104,7 +106,7 @@ func (m Model) tempMapView() string {
 	p := m.mapProjection()
 	var baseMap *render.Canvas
 	if m.grid.pts != nil {
-		baseMap = render.TempMap(p, m.grid.pts)
+		baseMap = render.TempMap(p, m.grid.points())
 	} else {
 		baseMap = render.Outline(p)
 	}
@@ -112,6 +114,10 @@ func (m Model) tempMapView() string {
 	rightW := m.rightWidth(c)
 
 	title := titleStyle.Render("TEMPERATURA ACTUAL")
+	if m.grid.off > 0 {
+		t := time.Now().Truncate(time.Hour).Add(time.Duration(m.grid.off) * time.Hour)
+		title = titleStyle.Render(fmt.Sprintf("PRONÓSTICO +%d h · %s", m.grid.off, t.Format("15:04")))
+	}
 	var info []string
 	switch {
 	case m.grid.pts == nil && m.grid.loading:
@@ -139,7 +145,7 @@ func (m Model) tempMapView() string {
 		if m.grid.loading {
 			info = append(info, "", m.spin.View()+dimStyle.Render(" actualizando..."))
 		}
-		info = append(info, "", dimStyle.Render("• ciudades  ◘ "+truncate(m.loc.Name, 16)), dimStyle.Render("Datos: Open-Meteo.com"))
+		info = append(info, "", dimStyle.Render("• ciudades  ◘ "+truncate(m.loc.Name, 16)), dimStyle.Render("←/→ hora · Datos: Open-Meteo.com"))
 	}
 	return m.splitMap(c, info)
 }
@@ -172,7 +178,8 @@ func (m Model) cityTemps() []string {
 		cur.WriteString(labelStyle.Render(c.Short))
 		cur.WriteString(base.Render(" "))
 		cur.WriteString(tempStyle(pw.Temperature).Render(fmt.Sprintf("%3.0f°", pw.Temperature)))
-		cur.WriteString(base.Render("  "))
+		cur.WriteString(artStyle.Render(api.Arrow(pw.WindDir)))
+		cur.WriteString(base.Render(" "))
 		if i%3 == 2 {
 			lines = append(lines, cur.String())
 			cur.Reset()
@@ -187,12 +194,13 @@ func (m Model) cityTemps() []string {
 // cityTable: versión extendida, una ciudad por línea con barra de temperatura.
 func (m Model) cityTable(rightW int) []string {
 	lines := []string{titleStyle.Render("CIUDADES")}
-	barW := rightW - 24
+	barW := rightW - 36
 	for i, pw := range m.grid.cities() {
 		c := geo.Cities[i]
 		lines = append(lines,
 			labelStyle.Render(c.Short)+base.Render(fmt.Sprintf(" %-13s", c.Name))+
 				tempStyle(pw.Temperature).Render(fmt.Sprintf("%4.0f° ", pw.Temperature))+
+				artStyle.Render(api.Arrow(pw.WindDir))+base.Render(fmt.Sprintf("%3.0f ", pw.Wind))+
 				bar(pw.Temperature, -5, 40, barW, render.TempColor(pw.Temperature)))
 	}
 	return lines
