@@ -54,6 +54,7 @@ if [[ "$RELEASE" == "--release" ]]; then
 	command -v gh >/dev/null || { echo "Falta gh (https://cli.github.com)" >&2; exit 1; }
 	repo_args=()
 	[[ -n "${REPO:-}" ]] && repo_args=(--repo "$REPO")
+	# ${arr[@]+...}: en bash 3.2 (macOS) expandir un array vacío con set -u falla.
 	gh release create "$VERSION" "$DIST"/*.tar.gz "$DIST"/*.zip "$DIST"/checksums.txt \
-		"${repo_args[@]}" --title "$VERSION" --generate-notes
+		${repo_args[@]+"${repo_args[@]}"} --title "$VERSION" --generate-notes
 fi
