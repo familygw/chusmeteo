@@ -40,7 +40,7 @@ func (a alertState) active(now time.Time, pt geo.LatLon) []*api.Alert {
 		}
 	}
 	api.SortAlerts(out, pt)
-	return out
+	return api.DedupAlerts(out, true) // el SMN repite cada alerta en varios archivos
 }
 
 // hailState: pronóstico de granizo de ICON para la ciudad elegida.
@@ -247,7 +247,8 @@ func (m Model) cityAlerts() (city, all []*api.Alert) {
 			city = append(city, a)
 		}
 	}
-	return city, all
+	// Para una ciudad, dos avisos que dicen lo mismo son uno solo aunque sus áreas difieran.
+	return api.DedupAlerts(city, false), all
 }
 
 // alertBadge: indicador para la barra superior ("" si no hay nada que avisar).

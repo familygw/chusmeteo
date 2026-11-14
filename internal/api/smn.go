@@ -404,6 +404,42 @@ func cleanDesc(s string) string {
 	return s
 }
 
+// key identifica "el mismo aviso": mismo texto, nivel y vencimiento. Con
+// withArea también tiene que coincidir el área (los polígonos).
+func (a *Alert) key(withArea bool) string {
+	k := fmt.Sprintf("%v|%s|%d|%s", a.ShortTerm, strings.ToUpper(a.Event), a.Level, a.Expires.UTC().Format("2006-01-02T15:04"))
+	if withArea {
+		for _, p := range a.Areas {
+			k += fmt.Sprintf("|%d", len(p))
+			for _, pt := range p {
+				k += fmt.Sprintf(";%.2f,%.2f", pt.Lat, pt.Lon)
+			}
+		}
+	}
+	return k
+}
+
+// DedupAlerts saca los avisos repetidos conservando el orden (queda el primero).
+//
+// El SMN publica cada alerta por zona en más de un archivo: el 14/11/2026 la
+// misma alerta naranja para Córdoba estaba en "Tormenta_Patagonia_..._6.xml"
+// y en "Tormenta_Llanura_..._6.xml", con el mismo texto, hora y vencimiento.
+//
+// withArea=true: sólo son el mismo si además cubren la misma área (para contar
+// avisos del país). withArea=false: alcanza con que digan lo mismo (para la
+// lista de UNA ciudad, donde dos áreas distintas con el mismo aviso no aportan).
+func DedupAlerts(alerts []*Alert, withArea bool) []*Alert {
+	seen := make(map[string]bool, len(alerts))
+	out := alerts[:0:0] // slice nuevo y vacío: no pisa el que nos pasaron
+	for _, a := range alerts {
+		if k := a.key(withArea); !seen[k] {
+			seen[k] = true
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
 // SortAlerts ordena: primero los que cubren el punto, después los de corto plazo,
 // y al final por nivel y granizo.
 func SortAlerts(alerts []*Alert, pt geo.LatLon) {

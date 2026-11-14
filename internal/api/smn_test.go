@@ -236,6 +236,32 @@ func TestShortTermAlert(t *testing.T) {
 	}
 }
 
+func TestDedupAlerts(t *testing.T) {
+	mk := func(event, expires, poly, link string) *Alert {
+		a, err := ParseCAP([]byte(capXML(event, expires, poly, "Update")), link)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return a
+	}
+	exp := "2026-11-14T08:59:59-03:00"
+	otherPoly := "-30.0,-65.0 -30.0,-63.0 -32.5,-63.0 -32.5,-65.0 -30.0,-65.0"
+	a := mk("Tormentas - AVISO NARANJA", exp, cbaPoly, "https://x/Tormenta_Patagonia_6.xml")
+	b := mk("Tormentas - AVISO NARANJA", exp, cbaPoly, "https://x/Tormenta_Llanura_6.xml")   // el mismo, en otro archivo
+	c := mk("Tormentas - AVISO NARANJA", exp, otherPoly, "https://x/Tormenta_Llanura_7.xml") // mismo texto, otra área
+	d := mk("Tormentas - AVISO AMARILLO", exp, cbaPoly, "https://x/Tormenta_Llanura_8.xml")  // otro nivel
+	all := []*Alert{a, b, c, d}
+	if got := DedupAlerts(all, true); len(got) != 3 || got[0] != a || got[1] != c || got[2] != d {
+		t.Errorf("con área: %d avisos", len(got))
+	}
+	if got := DedupAlerts(all, false); len(got) != 2 || got[0] != a || got[1] != d {
+		t.Errorf("sin área: %d avisos", len(got))
+	}
+	if len(all) != 4 || all[1] != b {
+		t.Error("DedupAlerts no debería modificar el slice original")
+	}
+}
+
 func TestConsensus(t *testing.T) {
 	for _, c := range []struct {
 		in   []HailRisk
