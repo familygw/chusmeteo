@@ -20,7 +20,13 @@ Hobby + excusa para aprender Go.
 > no API keys are needed. The interface and the rest of this README are in Spanish.
 > Run it with `go run ./cmd/chusmeteo -city "Córdoba"`.
 
-<img src="docs/img/mapa.png" alt="Vista de mapa: Argentina coloreada por temperatura, con ciudades y viento" width="520">
+| Mapa de temperaturas | Radar (RMA1 Córdoba, dBZ reales) |
+|---|---|
+| <img src="docs/img/mapa.png" alt="Vista de mapa: Argentina coloreada por temperatura, con ciudades y viento" width="400"> | <img src="docs/img/radar.png" alt="Vista de radar: zoom regional al radar de Córdoba con niveles en dBZ y resumen de celdas" width="440"> |
+
+| Avisos y granizo (F4) | ¿Qué pasó en tu zona? (F6) |
+|---|---|
+| <img src="docs/img/avisos.png" alt="Popup de avisos del SMN, observaciones METAR, celdas del radar y riesgo de los modelos" width="440"> | <img src="docs/img/feedback.png" alt="Formulario para anotar lluvia, granizo, viento y hora en el registro de aciertos" width="400"> |
 
 Todo es *responsive*: el panel ocupa la terminal entera y cada vista usa el
 espacio que tenga. Cuanto más grande la ventana, más detalle en pixel art.

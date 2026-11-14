@@ -193,7 +193,7 @@ func (m Model) reportBox() string {
 		// Los campos sin foco muestran sólo lo elegido: el diálogo queda corto.
 	}
 	body = append(body, pad(""),
-		pad(formDim.Render(truncate("↑↓ o número: opción · ←→ Tab: grupo · Enter anota · Esc cancela", in))),
+		pad(formDim.Render(truncate("↑↓ opción · ←→ grupo · Enter anota · Esc cancela", in))),
 		pad(""))
 
 	title := " ¿QUÉ PASÓ EN TU ZONA? "

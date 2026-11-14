@@ -408,7 +408,8 @@ func (m Model) popupLines(w int) []string {
 		if !a.Expires.IsZero() {
 			until += "hasta " + untilLabel(a.Expires.Local(), m.now) + " · "
 		}
-		lines = append(lines, dim("  "+until+a.AreaDesc))
+		// Las alertas por zona vienen sin descripción del área: sin el " · " colgando.
+		lines = append(lines, dim("  "+strings.TrimSuffix(until+a.AreaDesc, " · ")))
 	}
 	hailAll := 0
 	for _, a := range all {

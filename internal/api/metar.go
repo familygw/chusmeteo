@@ -67,6 +67,7 @@ func GetStations(ctx context.Context, loc Location, radiusDeg float64) ([]Statio
 		s := by[r.ICAO]
 		if s == nil {
 			name, _, _ := strings.Cut(r.Name, ",")
+			name, _, _ = strings.Cut(name, "/") // "Cordoba/Taravella Intl" -> "Cordoba": deja lugar para el tiempo presente
 			s = &Station{ICAO: r.ICAO, Name: name, DistKm: haversineKm(loc.Latitude, loc.Longitude, r.Lat, r.Lon)}
 			by[r.ICAO] = s
 		}
