@@ -3,6 +3,25 @@
 El clima en tu terminal, con estética de DOS de los 90.
 Hobby + excusa para aprender Go.
 
+![Vista de clima: condiciones actuales, pronóstico de 7 días y gráfico de 24 horas](docs/img/clima.png)
+
+> **In English.** chusmeteo is a weather app for Argentina that runs in your terminal and
+> looks like a 90s DOS program: 16 VGA colours, box-drawing dialogs and maps drawn with
+> half-block "pixels". It shows current conditions and a 7-day forecast, a temperature map
+> of the country, and animated weather radar. It is a hobby project written in Go with
+> [Bubble Tea](https://github.com/charmbracelet/bubbletea), and the code is commented as a
+> Go tutorial for people coming from Java.
+>
+> Its main focus is **hail**. It tracks strong radar cells from Argentina's national radar
+> network and estimates when they will reach you, follows the short-term warnings of the
+> national weather service (SMN), and compares four global models plus an 80-member
+> ensemble for the next 48 hours. Data comes from Open-Meteo, SMN, the Córdoba
+> Hydro-Meteorological Observatory (OHMC), NOAA's Aviation Weather Center and Rain Viewer;
+> no API keys are needed. The interface and the rest of this README are in Spanish.
+> Run it with `go run ./cmd/chusmeteo -city "Córdoba"`.
+
+<img src="docs/img/mapa.png" alt="Vista de mapa: Argentina coloreada por temperatura, con ciudades y viento" width="520">
+
 Todo es *responsive*: el panel ocupa la terminal entera y cada vista usa el
 espacio que tenga. Cuanto más grande la ventana, más detalle en pixel art.
 
@@ -74,7 +93,8 @@ O con `make`: `make run`, `make test`, `make build`, `make build-all`.
 | `F2` / `Tab`     | Cambiar de vista (`1` clima · `2` mapa · `3` radar)  |
 | `F3` / `/`       | Buscar ciudad (`"Córdoba, ES"` filtra por país)     |
 | `g`              | Usar la ubicación de la compu (macOS)               |
-| `F4` / `!`       | Avisos del SMN y riesgo de granizo (popup); ahí, `1` `2` `3` anotan qué pasó |
+| `F4` / `!`       | Avisos del SMN y riesgo de granizo (popup)          |
+| `F6` / `o`       | Anotar qué pasó en tu zona (registro de aciertos)   |
 | `F5` / `r`       | Refrescar ahora                                     |
 | `a`              | Repetir la recepción del satélite                   |
 | `Espacio`        | Radar: play / pausa                                 |
@@ -220,8 +240,9 @@ granizo pero no lo confirma (ni siquiera 60 dBZ garantizan que llegue al suelo).
 algo se agrega un renglón JSON a `registro.jsonl` en el directorio de configuración del
 usuario (macOS: `~/Library/Application Support/chusmeteo/`): celda llegando o encima, aviso
 a corto plazo sobre la ciudad, riesgo moderado/alto de los modelos y granizo reportado por
-un aeropuerto. En el popup F4, las teclas `1` `2` `3` anotan lo que viste vos (nada, lluvia
-fuerte, granizo). Cada renglón lleva una foto del estado (radar, isoterma, CAPE, SHIP,
+un aeropuerto. Con `F6` / `o` se abre un formulario para anotar lo que viste vos: qué pasó
+(nada, lluvia ligera, lluvia fuerte, lluvia y granizo, solo granizo), tamaño del granizo,
+viento y hace cuánto (`ui/report.go`). Cada renglón lleva una foto del estado (radar, isoterma, CAPE, SHIP,
 avisos), así se entiende solo. Para mirarlo: `jq -c '[.hora,.tipo,.datos.que]' registro.jsonl`.
 
 ## Go para alguien que viene de Java
@@ -275,6 +296,10 @@ Detalles de Go que aparecen en el código y conviene mirar:
   - avisos vencidos del día (historial), para ver qué pasó aunque ya no estén vigentes
   - predicción de pasadas de Meteor-M (TLE + SGP4) para saber cuándo capturar
   - rayos casi en vivo del GLM de GOES-East (NOAA en AWS, NetCDF) sobre el radar
+
+## Licencia
+
+[MIT](LICENSE). Los datos son de sus fuentes (ver abajo), cada una con sus condiciones de uso.
 
 ## Datos y atribución
 

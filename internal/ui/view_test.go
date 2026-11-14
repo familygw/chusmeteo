@@ -363,7 +363,7 @@ func TestDumpView(t *testing.T) {
 		t.Skip("seteá CHUSMETEO_DUMP=clima|mapa|radar|rx para imprimir la pantalla")
 	}
 	v, _ := ParseView(which)
-	if which == "rx" || which == "popup" {
+	if which == "rx" || which == "popup" || which == "form" {
 		v = viewMap
 	}
 	w, h := 80, 24
@@ -377,6 +377,10 @@ func TestDumpView(t *testing.T) {
 	}
 	if which == "popup" {
 		m.showAlerts = true
+	}
+	if which == "form" {
+		m = m.openReport()
+		m.report.val[fieldWhat] = 3
 	}
 	t.Log("\n" + m.View())
 }
@@ -524,12 +528,40 @@ func TestRegistro(t *testing.T) {
 	run(cmd)
 	m, cmd = send(m, nowMsg{nc: nc, loc: "Córdoba"})
 	run(cmd)
-	// La persona anota lo que vio desde el popup.
+	// La persona abre el formulario desde el popup y anota: lluvia y granizo mediano, hace 15 min.
+	key := func(k string) {
+		msg := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(k)}
+		switch k {
+		case "down":
+			msg = tea.KeyMsg{Type: tea.KeyDown}
+		case "right":
+			msg = tea.KeyMsg{Type: tea.KeyRight}
+		case "enter":
+			msg = tea.KeyMsg{Type: tea.KeyEnter}
+		}
+		m, cmd = send(m, msg)
+		run(cmd)
+	}
 	m.showAlerts = true
-	m, cmd = send(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("2")})
-	run(cmd)
-	if out := m.View(); !strings.Contains(out, "lluvia fuerte en el registro") {
-		t.Error("el popup debería confirmar lo anotado")
+	key("o")
+	if !m.showReport || m.showAlerts {
+		t.Fatal("la tecla o debería abrir el formulario")
+	}
+	if out := m.View(); !strings.Contains(out, "QUÉ PASÓ EN TU ZONA") || strings.Contains(out, "Granizo:") {
+		t.Error("el formulario arranca sin el campo de granizo")
+	}
+	key("4") // lluvia y granizo
+	if out := m.View(); !strings.Contains(out, "Granizo:") || lipgloss.Height(out) != 50 {
+		t.Error("con granizo debería aparecer el tamaño")
+	}
+	key("right") // grupo: tamaño
+	key("down")  // pequeño -> mediano
+	key("right") // viento
+	key("right") // cuándo
+	key("down")  // ahora -> hace 15 min
+	key("enter")
+	if m.showReport || !strings.Contains(m.lastReport, "lluvia y granizo mediano") {
+		t.Errorf("no anotó: %q", m.lastReport)
 	}
 
 	body, err := os.ReadFile(registro.Path)
@@ -545,7 +577,8 @@ func TestRegistro(t *testing.T) {
 			t.Errorf("entrada %d: %s", i, lines[i])
 		}
 	}
-	if !strings.Contains(lines[1], `"que":"lluvia fuerte"`) || !strings.Contains(lines[1], `"eta_nivel":4`) {
+	if !strings.Contains(lines[1], `"que":"lluvia y granizo"`) || !strings.Contains(lines[1], `"granizo_tamano":"mediano"`) ||
+		!strings.Contains(lines[1], `"hace_min":15`) || !strings.Contains(lines[1], `"viento":"calmo"`) || !strings.Contains(lines[1], `"eta_nivel":4`) {
 		t.Errorf("entrada del usuario: %s", lines[1])
 	}
 }

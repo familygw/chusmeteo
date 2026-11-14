@@ -13,7 +13,7 @@ import (
 )
 
 // Version se pisa al compilar: -ldflags "-X chusmeteo/internal/ui.Version=v1.2.3".
-var Version = "v0.8"
+var Version = "v0.9"
 
 const (
 	minW = 72
@@ -74,6 +74,12 @@ func (m Model) View() string {
 	// Width incluye el padding; los bordes suman 2 más.
 	panel := panelStyle.Width(m.width - 2).Height(m.height - 4).Render(content)
 	screen := lipgloss.JoinVertical(lipgloss.Left, m.headerView(), panel, m.footerView())
+	if m.showReport {
+		box := m.reportBox()
+		x := (m.width - lipgloss.Width(box)) / 2
+		y := max(1, (m.height-lipgloss.Height(box))/2)
+		screen = overlay(screen, box, x, y)
+	}
 	if m.showAlerts {
 		box := m.popupBox()
 		x := (m.width - lipgloss.Width(box)) / 2
@@ -329,7 +335,8 @@ func (m Model) helpView() string {
 		key("F2  Tab", "Cambiar de vista (o 1 clima · 2 mapa · 3 radar)"),
 		key("F3  /  c", "Buscar otra ciudad (\"Ciudad, AR\" filtra por país)"),
 		key("g", "Usar la ubicación de esta compu (macOS, CoreLocationCLI)"),
-		key("F4  !", "Avisos del SMN y riesgo de granizo (modelo ICON)"),
+		key("F4  !", "Avisos del SMN, celdas del radar y riesgo de granizo"),
+		key("F6  o", "Anotar qué pasó en tu zona (registro de aciertos)"),
 		key("F5  r", "Refrescar ahora (clima 15 min, mapa 30, radar 10)"),
 		key("a", "Repetir la recepción del satélite"),
 		key("Esp  p", "Radar: play / pausa"),

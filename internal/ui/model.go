@@ -127,6 +127,8 @@ type Model struct {
 	logged     map[string]bool // lo ya anotado en esta ejecución
 	logCell    string          // último estado anotado de las celdas
 	lastReport string          // "19:08 lluvia fuerte": confirmación en el popup
+	showReport bool            // formulario "¿qué pasó?" (report.go)
+	report     reportForm
 
 	// efectos
 	rx      *fx.Reception // nil = no hay recepción en curso
@@ -328,12 +330,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.searching {
 			return m.updateSearch(msg)
 		}
+		if m.showReport {
+			return m.updateReport(msg)
+		}
 		if m.showAlerts { // el popup es "modal": se come las teclas
 			switch msg.String() {
 			case "esc", "enter", " ", "f4", "!", "q":
 				m.showAlerts = false
-			case "1", "2", "3": // "¿qué pasó en tu zona?": va al registro de aciertos
-				return m.logUser(msg.String())
+			case "o", "f6": // "¿qué pasó en tu zona?": abre el formulario
+				return m.openReport(), nil
 			case "ctrl+c":
 				return m, tea.Quit
 			}
@@ -360,6 +365,8 @@ func (m Model) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.showHelp = !m.showHelp
 	case "f4", "!":
 		m.showAlerts = true
+	case "f6", "o":
+		return m.openReport(), nil
 	case "f2", "tab":
 		return m.switchView((m.view + 1) % m.numViews())
 	case "shift+tab":

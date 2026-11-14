@@ -143,15 +143,12 @@ func (m Model) logObs() tea.Cmd {
 	return m.logCmd(registro.Metar, map[string]any{"estacion": st.ICAO, "km": round1(st.DistKm), "hora": st.HailAt, "reporte": st.Raw})
 }
 
-// reports: lo que se puede anotar desde el popup (teclas 1, 2 y 3).
-var reports = map[string]string{"1": "nada", "2": "lluvia fuerte", "3": "granizo"}
-
-// logUser anota lo que la persona vio en su zona.
-func (m Model) logUser(key string) (Model, tea.Cmd) {
-	what, ok := reports[key]
-	if !ok || m.state != stateReady {
-		return m, nil
+// openReport abre el formulario "¿qué pasó?" con los valores por defecto.
+func (m Model) openReport() Model {
+	if m.state != stateReady { // sin ubicación no hay qué anotar
+		return m
 	}
-	m.lastReport = m.now.Format("15:04") + " " + what
-	return m, m.logCmd(registro.Usuario, map[string]any{"que": what})
+	m.showReport, m.showAlerts, m.report = true, false, reportForm{}
+	m.report.val[fieldWhat] = 2 // lo más común de anotar: lluvia fuerte
+	return m
 }

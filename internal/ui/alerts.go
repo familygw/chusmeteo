@@ -570,10 +570,10 @@ func (m Model) popupLines(w int) []string {
 		pad(""))
 
 	// Registro de aciertos: lo que viste vos es el dato que más vale.
-	lines = append(lines, text("¿Qué pasó en tu zona?  1 nada · 2 lluvia fuerte · 3 granizo"))
 	if m.lastReport != "" {
-		lines = append(lines, hi("Anotado "+m.lastReport+" en el registro."))
+		lines = append(lines, hi("Anotado en el registro: "+m.lastReport+"."))
 	}
+	lines = append(lines, text("¿Qué pasó en tu zona? Tecla o (o F6) para anotarlo."))
 	lines = append(lines, pad(""))
 
 	btn := popupBtn.Render("  Aceptar  ")
