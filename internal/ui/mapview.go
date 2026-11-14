@@ -229,19 +229,62 @@ func (m Model) extremes() []string {
 
 // --- Vista 3: radar ---
 
+// radarProjection: con un radar local, zoom a lo que ve ese radar (~480 km
+// de lado); con Rain Viewer, el país entero.
+func (m Model) radarProjection() geo.Projection {
+	idx := m.radar.idx
+	if idx == nil || idx.Area == nil {
+		return m.mapProjection()
+	}
+	maxW := m.contentW() - m.frameW() - gapW - minRightW
+	return geo.NewBoxProjection(*idx.Area, max(maxW, 10), max(m.contentH(), 8)*2)
+}
+
+// cellLines: el nowcast en dos renglones, para la columna del radar.
+func (m Model) cellLines(w int) []string {
+	nc := m.cells.nc
+	if nc == nil || nc.NoCoverage || m.now.Sub(nc.Time) > 40*time.Minute {
+		return nil
+	}
+	lines := []string{titleStyle.Render("CELDAS FUERTES")}
+	switch {
+	case nc.Overhead:
+		lines = append(lines, errStyle.Render(truncate("▲ Núcleo sobre tu zona", w)))
+	case nc.Near:
+		lines = append(lines, valueStyle.Render(truncate(fmt.Sprintf("La más cercana: %.0f km al %s", nc.NearKm, nc.NearDir), w)))
+	default:
+		return append(lines, dimStyle.Render("Ninguna a menos de 120 km"))
+	}
+	if nc.Moving {
+		lines = append(lines, base.Render(truncate(fmt.Sprintf("Van al %s a %.0f km/h", nc.Toward, nc.SpeedKmh), w)))
+	}
+	if nc.Approaching {
+		mins := max(int(nc.ETA.Sub(m.now).Minutes()), 0)
+		lines = append(lines, errStyle.Render(truncate(fmt.Sprintf("▲ Llegaría ~%s (en %d min)", nc.ETA.Local().Format("15:04"), mins), w)))
+	} else if !nc.Overhead && nc.Moving {
+		lines = append(lines, dimStyle.Render("Ninguna apunta a tu zona"))
+	}
+	return lines
+}
+
 func (m Model) radarView() string {
-	p := m.mapProjection()
+	p := m.radarProjection()
 	c := m.mapCanvas(render.RadarMap(p, m.radar.current()), p)
 	rightW := m.rightWidth(c)
 	r := m.radar
+	local := r.idx != nil && r.idx.Area != nil
 
-	info := []string{titleStyle.Render("RADAR · PRECIPITACIÓN")}
+	title := "RADAR · PRECIPITACIÓN"
+	if local {
+		title = "RADAR " + strings.ToUpper(r.idx.Source)
+	}
+	info := []string{titleStyle.Render(truncate(title, rightW))}
 	switch {
-	case r.idx == nil && r.loading:
-		info = append(info, "", m.spin.View()+base.Render(" Buscando frames..."))
 	case r.idx == nil && r.err != nil:
 		info = append(info, "", errStyle.Render("▲ ERROR DE RECEPCIÓN"),
 			base.Width(rightW).Render(r.err.Error()), "", dimStyle.Render("F5 reintentar"))
+	case r.idx == nil:
+		info = append(info, "", m.spin.View()+base.Render(" Buscando el radar..."))
 	case r.idx != nil:
 		state := valueStyle.Render("▶ ANIMANDO")
 		if !r.playing {
@@ -254,30 +297,48 @@ func (m Model) radarView() string {
 				valueStyle.Render(f.Time.Local().Format("15:04"))
 		}
 		info = append(info, l1, l2, m.timeline(), "")
+		dbz := [...]string{"", "20–35 dBZ", "35–45 dBZ", "45–55 dBZ", "55+ dBZ"}
 		for lvl := 1; lvl < len(render.RadarBands); lvl++ {
 			b := render.RadarBands[lvl]
-			info = append(info, swatch(b.Color)+base.Render(" "+b.Label))
+			label := b.Label
+			if local {
+				label = truncate(fmt.Sprintf("%-9s %s", dbz[lvl], label), rightW-3)
+			}
+			info = append(info, swatch(b.Color)+base.Render(" "+label))
 		}
 		info = append(info, "")
-		if m.detailed(rightW) {
+		if s := m.rainSummary(); s != "" && (local || !m.detailed(rightW)) {
+			info = append(info, base.Render(s), "")
+		}
+		switch {
+		case local:
+			if cl := m.cellLines(rightW); cl != nil {
+				info = append(info, cl...)
+				info = append(info, "")
+			}
+		case m.detailed(rightW):
 			info = append(info, m.cityRain()...)
 			info = append(info, "")
-		} else if s := m.rainSummary(); s != "" {
-			info = append(info, base.Render(s), "")
 		}
 		if r.pending > 0 {
 			info = append(info, m.spin.View()+dimStyle.Render(fmt.Sprintf(" bajando %d cuadros...", r.pending)))
 		} else {
-			info = append(info, dimStyle.Render(fmt.Sprintf("%d cuadros · cada 10 min", len(r.frames))))
+			info = append(info, dimStyle.Render(fmt.Sprintf("%d cuadros · cada ~10 min", len(r.frames))))
 		}
 		if r.err != nil {
 			info = append(info, errStyle.Render(truncate("▲ "+r.err.Error(), rightW)))
 		}
-		info = append(info,
-			dimStyle.Render("ESPACIO play/pausa · ←/→"),
-			"",
-			labelStyle.Render("Radar: Rain Viewer"), // atribución obligatoria
-			dimStyle.Render("rainviewer.com"))
+		info = append(info, dimStyle.Render("ESPACIO play/pausa · ←/→"), "")
+		if local {
+			info = append(info,
+				labelStyle.Render("Radar: OHMC Córdoba"), // atribución
+				dimStyle.Render("webmet.ohmc.ar · COLMAX"))
+		} else {
+			info = append(info,
+				labelStyle.Render("Radar: Rain Viewer"), // atribución obligatoria
+				dimStyle.Render("rainviewer.com"),
+				dimStyle.Render("(sin radares argentinos)"))
+		}
 	}
 	return m.splitMap(c, info)
 }
@@ -299,19 +360,21 @@ func (m Model) timeline() string {
 	return b.String()
 }
 
-// rainAt devuelve el nivel de lluvia más alto en ~25 km alrededor de un punto.
+// rainAt devuelve el nivel de lluvia más alto alrededor de un punto (~25 km en el mosaico nacional).
 func (m Model) rainAt(pt geo.LatLon) int {
 	img := m.radar.current()
 	if img == nil {
 		return 0
 	}
 	best := 0
-	const d = 0.25
+	d := 0.25
+	if m.radar.idx != nil && m.radar.idx.Area != nil {
+		d = 0.05 // el radar local tiene detalle de sobra: ~5 km alcanza
+	}
 	k := math.Cos(pt.Lat * math.Pi / 180)
 	for dy := -1.0; dy <= 1; dy++ {
 		for dx := -1.0; dx <= 1; dx++ {
-			s := img.Sample(geo.LatLon{Lat: pt.Lat + dy*d, Lon: pt.Lon + dx*d/k})
-			best = max(best, render.RadarLevel(s))
+			best = max(best, img.Level(geo.LatLon{Lat: pt.Lat + dy*d, Lon: pt.Lon + dx*d/k}, render.RadarLevel))
 		}
 	}
 	return best

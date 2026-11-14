@@ -47,11 +47,13 @@ func (r *Regions) border(x, y int) bool {
 	return false
 }
 
-var regionCache = map[[2]int]*Regions{}
+// La clave es la proyección entera: un struct con campos comparables sirve de
+// clave de map, así el mapa nacional y un zoom regional no se pisan.
+var regionCache = map[geo.Projection]*Regions{}
 
 // RegionsFor devuelve (y cachea) el raster para una proyección.
 func RegionsFor(p geo.Projection) *Regions {
-	k := [2]int{p.W, p.H}
+	k := p
 	if r, ok := regionCache[k]; ok {
 		return r
 	}
@@ -147,7 +149,7 @@ func RadarMap(p geo.Projection, img *api.RadarImage) *Canvas {
 			for dy := -1; dy <= 1; dy++ {
 				for dx := -1; dx <= 1; dx++ {
 					pt := geo.LatLon{Lat: center.Lat + float64(dy)*step, Lon: center.Lon + float64(dx)*step/k}
-					best = max(best, RadarLevel(img.Sample(pt)))
+					best = max(best, img.Level(pt, RadarLevel))
 				}
 			}
 			if best > 0 {

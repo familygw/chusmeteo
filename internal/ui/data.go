@@ -14,7 +14,7 @@ import (
 const (
 	gridStep   = 2.5              // grados entre puntos de la grilla (~45 puntos)
 	gridTTL    = 30 * time.Minute // cada coordenada gasta cupo: no refrescar seguido
-	radarTTL   = 10 * time.Minute // Rain Viewer publica un frame cada 10 min
+	radarTTL   = 5 * time.Minute  // hay cuadro nuevo cada ~10 min; sólo se bajan los nuevos
 	retryAfter = time.Minute      // si falló, esperar antes de reintentar solo
 	rxEvery    = 60 * time.Millisecond
 	animEvery  = 450 * time.Millisecond
@@ -75,7 +75,8 @@ type radarState struct {
 	pos     int                        // frame que se muestra
 	playing bool
 	hold    int
-	pending int // frames descargándose
+	pending int    // frames descargándose
+	loc     string // ciudad para la que se eligió el radar
 	at      time.Time
 	tried   time.Time
 	loading bool // descargando el índice
@@ -121,11 +122,13 @@ func fetchGrid() tea.Cmd {
 	}
 }
 
-func fetchRadarIndex() tea.Cmd {
+// fetchRadarIndex: con una ubicación, busca el radar argentino más cercano;
+// con nil (o si no hay radar cerca), el mosaico nacional de Rain Viewer.
+func fetchRadarIndex(loc *api.Location) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
-		idx, err := api.GetRadarIndex(ctx)
+		idx, err := api.GetRadarIndexFor(ctx, loc)
 		if err != nil {
 			return radarErrMsg{err: err}
 		}
@@ -135,11 +138,11 @@ func fetchRadarIndex() tea.Cmd {
 
 // fetchRadarFrame: un comando por frame. Bubble Tea los corre en paralelo
 // (cada tea.Cmd en su goroutine) y el semáforo de api limita las descargas.
-func fetchRadarFrame(host string, f api.RadarFrame) tea.Cmd {
+func fetchRadarFrame(idx *api.RadarIndex, f api.RadarFrame) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		img, err := api.FetchRadarFrame(ctx, host, f)
+		img, err := api.FetchRadarFrame(ctx, idx, f)
 		if err != nil {
 			return radarErrMsg{err: err, frame: true}
 		}
@@ -171,11 +174,19 @@ func (m Model) ensureData() (Model, tea.Cmd) {
 	case viewSat:
 		return m.ensureSat()
 	case viewRadar:
+		if m.state == stateLoading {
+			break // todavía no sabemos dónde estamos: esperamos para elegir el radar
+		}
 		r := &m.radar
 		stale := r.idx == nil || now.Sub(r.at) > radarTTL
 		if stale && !r.loading && now.Sub(r.tried) > retryAfter {
 			r.loading, r.tried = true, now
-			return m, tea.Batch(fetchRadarIndex(), m.spin.Tick)
+			var loc *api.Location
+			if m.state == stateReady {
+				l := m.loc // copia: el puntero no apunta adentro del modelo
+				loc = &l
+			}
+			return m, tea.Batch(fetchRadarIndex(loc), m.spin.Tick)
 		}
 	}
 	return m, nil
@@ -207,7 +218,7 @@ func (m Model) onRadarIndex(idx *api.RadarIndex) (Model, tea.Cmd) {
 		keep[f.Path] = true
 		if _, ok := r.frames[f.Path]; !ok {
 			r.pending++
-			cmds = append(cmds, fetchRadarFrame(idx.Host, f))
+			cmds = append(cmds, fetchRadarFrame(idx, f))
 		}
 	}
 	for path := range r.frames {
@@ -231,6 +242,13 @@ func (m Model) onRadarFrame(img *api.RadarImage) (Model, tea.Cmd) {
 	if r.idx == nil {
 		return m, nil
 	}
+	known := false
+	for _, f := range r.idx.Frames {
+		known = known || f.Path == img.Frame.Path
+	}
+	if !known { // cuadro de un índice anterior (cambió la ciudad mientras bajaba)
+		return m, nil
+	}
 	r.frames[img.Frame.Path] = img
 	// Cuando llega el frame más reciente, arranca la "pasada del satélite".
 	latest := r.idx.Frames[len(r.idx.Frames)-1].Path
@@ -250,7 +268,11 @@ func (m Model) startReception() (Model, tea.Cmd) {
 		m.rx = nil
 		return m.startAnim()
 	}
-	m.rx = fx.NewReception(m.mapProjection().H, uint64(time.Now().UnixNano()))
+	h := m.mapProjection().H
+	if m.view == viewRadar {
+		h = m.radarProjection().H
+	}
+	m.rx = fx.NewReception(h, uint64(time.Now().UnixNano()))
 	return m, rxTick(m.rxGen)
 }
 

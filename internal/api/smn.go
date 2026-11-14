@@ -57,11 +57,14 @@ type Alert struct {
 	AreaDesc string
 	Level    Level
 	Hail     bool // menciona granizo
-	Sent     time.Time
-	Expires  time.Time
-	Areas    []geo.Polygon
-	status   string
-	msgType  string
+	// ShortTerm: "aviso a corto plazo" (ACP). El SMN lo emite mirando el radar,
+	// vale 1 a 3 horas y es lo más parecido a "está por caer ahora".
+	ShortTerm bool
+	Sent      time.Time
+	Expires   time.Time
+	Areas     []geo.Polygon
+	status    string
+	msgType   string
 }
 
 // Active: vigente, real y no es una cancelación.
@@ -313,8 +316,14 @@ func ParseCAP(body []byte, link string) (*Alert, error) {
 		status:   strings.TrimSpace(doc.Status),
 		msgType:  strings.TrimSpace(doc.MsgType),
 	}
+	// Sólo por la carpeta: urgency=Immediate también lo llevan las alertas
+	// comunes cuando ya empezó su período, así que no sirve para distinguir.
+	a.ShortTerm = strings.Contains(link, "avisocortoplazo")
 	a.Sent, _ = time.Parse(time.RFC3339, strings.TrimSpace(doc.Sent))
 	a.Expires, _ = time.Parse(time.RFC3339, strings.TrimSpace(info.Expires))
+	if a.ShortTerm {
+		a.Sent, a.Expires = asUTC(a.Sent), asUTC(a.Expires)
+	}
 
 	var descs []string
 	for _, ar := range info.Areas {
@@ -333,6 +342,18 @@ func ParseCAP(body []byte, link string) (*Alert, error) {
 	a.Hail = strings.Contains(text, "GRANIZO")
 	a.Level = levelOf(strings.ToUpper(a.Event+" "+a.Headline), info.Severity)
 	return a, nil
+}
+
+// asUTC relee la hora "de reloj" como UTC. Los avisos a corto plazo traen la
+// hora UTC rotulada como -03:00 (verificado el 13 y el 14/11/2026: a las 00:53
+// de Argentina el más nuevo decía "03:26-03:00", o sea dos horas y media en el
+// futuro). Sin esto figuran vigentes 3 horas de más. Las alertas por zona
+// vienen bien. Si el SMN lo corrige, hay que sacar esta función.
+func asUTC(t time.Time) time.Time {
+	if t.IsZero() {
+		return t
+	}
+	return time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), t.Minute(), t.Second(), 0, time.UTC)
 }
 
 // levelOf: el color viene escrito en el evento ("AVISO NARANJA"); si no,
@@ -383,12 +404,16 @@ func cleanDesc(s string) string {
 	return s
 }
 
-// SortAlerts ordena: primero los que cubren el punto, después por nivel y granizo.
+// SortAlerts ordena: primero los que cubren el punto, después los de corto plazo,
+// y al final por nivel y granizo.
 func SortAlerts(alerts []*Alert, pt geo.LatLon) {
 	sort.SliceStable(alerts, func(i, j int) bool {
 		a, b := alerts[i], alerts[j]
 		if ca, cb := a.Covers(pt), b.Covers(pt); ca != cb {
 			return ca
+		}
+		if a.ShortTerm != b.ShortTerm {
+			return a.ShortTerm
 		}
 		if a.Level != b.Level {
 			return a.Level > b.Level

@@ -8,6 +8,7 @@ import (
 
 	"chusmeteo/internal/api"
 	"chusmeteo/internal/geo"
+	"chusmeteo/internal/render"
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
@@ -15,7 +16,10 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-const alertsTTL = 10 * time.Minute // el SMN limita a ~200 pedidos cada 10 min
+// El índice del SMN es UN pedido y los XML se cachean: consultarlo seguido es
+// barato (el límite es ~200 pedidos cada 10 min). Importa porque los avisos a
+// corto plazo duran 1 a 3 horas: enterarse 10 minutos tarde es mucho.
+const alertsTTL = 3 * time.Minute
 
 // alertState: avisos del SMN. byURL es el caché (sólo se bajan los nuevos).
 type alertState struct {
@@ -113,6 +117,56 @@ func (m Model) ensureObs() (Model, tea.Cmd) {
 	}
 }
 
+// nowState: nowcast de celdas fuertes con el radar, alrededor de la ciudad elegida.
+type nowState struct {
+	nc      *api.Nowcast
+	grids   map[string]*api.RadarGrid // caché por path del cuadro (son inmutables)
+	loc     string
+	at      time.Time
+	tried   time.Time
+	loading bool
+	err     error
+}
+
+type nowMsg struct {
+	nc    *api.Nowcast
+	grids map[string]*api.RadarGrid
+	loc   string
+}
+type nowErrMsg struct {
+	err error
+	loc string
+}
+
+const (
+	nowTTL    = 5 * time.Minute  // hay cuadro nuevo cada 10: con 5 lo agarramos rápido
+	nowWithin = 60 * time.Minute // la barra avisa si la celda llega antes de esto
+)
+
+func (m Model) ensureNow() (Model, tea.Cmd) {
+	n := &m.cells
+	now := time.Now()
+	if m.state != stateReady || n.loading || now.Sub(n.at) < nowTTL || now.Sub(n.tried) < retryAfter {
+		return m, nil
+	}
+	n.loading, n.tried = true, now
+	loc, cache := m.loc, n.grids // el map no se modifica nunca: GetNowcast devuelve uno nuevo
+	return m, func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		nc, grids, err := api.GetNowcast(ctx, loc, cache, render.RadarLevel)
+		if err != nil {
+			return nowErrMsg{err, loc.Name}
+		}
+		return nowMsg{nc, grids, loc.Name}
+	}
+}
+
+// cellThreat: núcleo fuerte encima o llegando en la próxima hora.
+func (m Model) cellThreat() (level int, ok bool) {
+	return m.cells.nc.Threat(m.now, nowWithin)
+}
+
 // officialHail: el nivel más alto entre los avisos del SMN con granizo que cubren la ciudad.
 func (m Model) officialHail() (api.Level, bool) {
 	city, _ := m.cityAlerts()
@@ -137,10 +191,11 @@ func (m Model) hailObserved() (api.Station, bool) {
 
 // ensureAlerts: los avisos se actualizan en segundo plano, en cualquier vista.
 func (m Model) ensureAlerts() (Model, tea.Cmd) {
-	var c1, c2 tea.Cmd
+	var c1, c2, c3 tea.Cmd
 	m, c1 = m.ensureSMN()
 	m, c2 = m.ensureObs()
-	return m, tea.Batch(c1, c2)
+	m, c3 = m.ensureNow()
+	return m, tea.Batch(c1, c2, c3)
 }
 
 func (m Model) ensureSMN() (Model, tea.Cmd) {
@@ -198,33 +253,83 @@ func (m Model) cityAlerts() (city, all []*api.Alert) {
 // alertBadge: indicador para la barra superior ("" si no hay nada que avisar).
 func (m Model) alertBadge(short bool) string {
 	city, all := m.cityAlerts()
-	ho := m.hail.outlook
-	hailRisk := ho != nil && ho.Max >= api.HailModerate
-	if countHail(city) > 0 {
-		hailRisk = true
-	}
-	if _, ok := m.hailObserved(); ok {
-		hailRisk = true
-	}
-	blink := m.now.Second()%2 == 0
-	switch {
-	case len(city) > 0 || hailRisk:
-		text := " ⚠ GRANIZO? F4 "
-		if len(city) > 0 {
-			text = " ⚠ AVISO SMN F4 "
+
+	// 1) URGENTE (titila): lo que habla de ESTE punto y de AHORA, de más a
+	// menos confiable: la celda en el radar, el aviso a corto plazo del SMN
+	// (sale del radar, polígono chico) y el granizo visto en un aeropuerto.
+	urgent := ""
+	if _, ok := m.cellThreat(); ok {
+		nc := m.cells.nc
+		urgent = " ⚠ CELDA ENCIMA F4 "
+		if !nc.Overhead {
+			urgent = fmt.Sprintf(" ⚠ CELDA EN %d MIN F4 ", max(int(nc.ETA.Sub(m.now).Minutes()), 0))
 		}
+	}
+	if urgent == "" {
+		for _, a := range city {
+			if a.ShortTerm {
+				urgent = " ⚠ AVISO A CORTO PLAZO F4 "
+				break
+			}
+		}
+	}
+	if _, ok := m.hailObserved(); ok && urgent == "" {
+		urgent = " ⚠ GRANIZO OBSERVADO CERCA F4 "
+	}
+	if urgent != "" {
 		if short {
-			text = " ⚠ F4 "
+			urgent = " ⚠ F4 "
 		}
 		st := popupTitle
-		if blink {
+		if m.now.Second()%2 == 0 {
 			st = popupText.Bold(true)
 		}
-		return st.Render(text)
+		return st.Render(urgent)
+	}
+
+	// 2) CONTEXTO DEL DÍA (fijo, sin titilar): la alerta por zona del SMN y
+	// los modelos dicen "hoy puede pasar", no "te está por pasar". Con
+	// tormentas en la provincia están prendidos casi todo el día.
+	ho := m.hail.outlook // la barra mira 24 h; lo de pasado mañana está en el popup
+	calm := barStyle.Bold(true)
+	switch {
+	case len(city) > 0 && short:
+		return calm.Render(" ⚠ F4 ")
+	case len(city) > 0:
+		return calm.Render(" ⚠ AVISO SMN F4 ")
+	case ho != nil && ho.MaxWithin(24*time.Hour) >= api.HailModerate && short:
+		return calm.Render(" ⚠ F4 ")
+	case ho != nil && ho.MaxWithin(24*time.Hour) >= api.HailModerate:
+		return calm.Render(" ⚠ GRANIZO? F4 ")
 	case len(all) > 0 && !short:
 		return barStyle.Foreground(vgaDarkGray).Render(fmt.Sprintf(" SMN: %d avisos ", len(all)))
 	}
 	return ""
+}
+
+// meltLevel: con la isoterma de 0 °C por encima de esto, el granizo chico
+// suele derretirse antes de llegar al suelo (mismo umbral que api.EstimateHail).
+const meltLevel = 4600.0
+
+// freezingNow: altura de la isoterma de 0 °C en la hora actual, según los modelos.
+func (m Model) freezingNow() (float64, bool) {
+	o := m.hail.outlook
+	if o == nil || len(o.Hours) == 0 || o.Hours[0].FreezingLevel <= 0 {
+		return 0, false
+	}
+	return o.Hours[0].FreezingLevel, true
+}
+
+// hailNote: qué significa un núcleo intenso para el granizo, según la isoterma.
+// (13/11/2026: 55+ dBZ sobre Córdoba con isoterma a ~5100 m: lluvia fuerte, sin granizo.)
+func (m Model) hailNote(dbz bool) string {
+	if fzl, ok := m.freezingNow(); ok && fzl > meltLevel {
+		return fmt.Sprintf("  Lluvia muy intensa; granizo poco probable (0 °C a %.0f m).", fzl)
+	}
+	if dbz {
+		return "  Más de 55 dBZ: puede traer granizo (no siempre llega al suelo)."
+	}
+	return "  Eco intenso: puede traer granizo (el radar no lo confirma)."
 }
 
 // --- Popup al estilo de los diálogos de error de Norton Commander ---
@@ -285,15 +390,23 @@ func (m Model) popupLines(w int) []string {
 	for _, a := range city {
 		tag := levelStyle[a.Level].Render(fmt.Sprintf(" %-8s ", a.Level))
 		hail := ""
-		if a.Hail {
+		// Las alertas por zona nombran el granizo casi siempre (texto de molde):
+		// sólo resaltamos el de los avisos a corto plazo, que salen del radar.
+		switch {
+		case a.Hail && a.ShortTerm:
 			hail = popupHi.Render(" ▲GRANIZO")
+		case a.Hail:
+			hail = popupDim.Render(" granizo posible")
 		}
 		ev := sentence(stripLevel(a.Event))
 		room := w - lipgloss.Width(tag) - lipgloss.Width(hail) - 1
 		lines = append(lines, pad(tag+popupText.Render(" "+truncate(ev, room))+hail))
 		until := ""
+		if a.ShortTerm {
+			until = "A CORTO PLAZO · "
+		}
 		if !a.Expires.IsZero() {
-			until = "hasta " + untilLabel(a.Expires.Local(), m.now) + " · "
+			until += "hasta " + untilLabel(a.Expires.Local(), m.now) + " · "
 		}
 		lines = append(lines, dim("  "+until+a.AreaDesc))
 	}
@@ -336,8 +449,73 @@ func (m Model) popupLines(w int) []string {
 	}
 	lines = append(lines, pad(""))
 
-	// ICON
-	lines = append(lines, hi("MODELO ICON · PRÓXIMAS 24 H (estimación)"))
+	// Radar (nowcast)
+	lines = append(lines, hi("RADAR · CELDAS FUERTES A MENOS DE 120 KM"))
+	lvlName := func(l int) string {
+		dbz := m.cells.nc != nil && m.cells.nc.DBZ
+		switch {
+		case l >= 4 && dbz:
+			return "intenso (55+ dBZ)"
+		case l >= 4:
+			return "intenso"
+		}
+		return "fuerte"
+	}
+	src := "" // "radar RMA1 Cordoba 18:33"
+	if nc := m.cells.nc; nc != nil {
+		src = nc.Source + " " + nc.Time.Local().Format("15:04")
+	}
+	switch nc := m.cells.nc; {
+	case nc == nil && m.cells.err != nil:
+		lines = append(lines, text("Sin datos: "+m.cells.err.Error()))
+	case nc == nil:
+		lines = append(lines, text("Esperando el radar..."))
+	case nc.NoCoverage:
+		lines = append(lines,
+			hi("Sin radar sobre tu zona (ni argentino ni de Rain Viewer)."),
+			text("No se puede saber desde acá si viene una celda: guiate por"),
+			text("los avisos de arriba."))
+	case m.now.Sub(nc.Time) > 40*time.Minute:
+		lines = append(lines, text("Último cuadro demasiado viejo ("+src+")."))
+	case !nc.Near:
+		lines = append(lines, text("Sin núcleos fuertes cerca ("+src+")."))
+	default:
+		l := fmt.Sprintf("Núcleo %s a %.0f km al %s", lvlName(nc.NearLevel), nc.NearKm, nc.NearDir)
+		if nc.Overhead {
+			l = "▲ Núcleo " + lvlName(nc.OverLevel) + " sobre tu zona"
+		}
+		if nc.Moving {
+			l += fmt.Sprintf(" · va al %s a %.0f km/h", nc.Toward, nc.SpeedKmh)
+		}
+		if nc.Overhead {
+			lines = append(lines, hi(l))
+		} else {
+			lines = append(lines, text(l))
+		}
+		switch {
+		case nc.Approaching:
+			mins := max(int(nc.ETA.Sub(m.now).Minutes()), 0)
+			l := fmt.Sprintf("▲ Llegaría uno %s desde el %s ~%s (en %d min)",
+				lvlName(nc.ETALevel), nc.FromDir, nc.ETA.Local().Format("15:04"), mins)
+			lines = append(lines, hi(l))
+			if nc.ETALevel >= 4 {
+				lines = append(lines, text(m.hailNote(nc.DBZ)))
+			}
+		case nc.Overhead:
+			if nc.OverLevel >= 4 {
+				lines = append(lines, text(m.hailNote(nc.DBZ)))
+			}
+			lines = append(lines, dim("  "+src))
+		case nc.Moving:
+			lines = append(lines, text("Por ahora ninguno apunta a tu zona ("+src+")."))
+		default:
+			lines = append(lines, text("No se pudo estimar hacia dónde se mueven ("+src+")."))
+		}
+	}
+	lines = append(lines, pad(""))
+
+	// Modelos
+	lines = append(lines, hi("MODELOS · PRÓXIMAS 48 H (estimación)"))
 	o := m.hail.outlook
 	switch {
 	case o == nil && m.hail.err != nil:
@@ -345,7 +523,7 @@ func (m Model) popupLines(w int) []string {
 	case o == nil:
 		lines = append(lines, text("Esperando el pronóstico..."))
 	default:
-		risk := popupText.Render("Riesgo según el modelo: ") + riskStyle[o.Max].Render(" "+o.Max.String()+" ")
+		risk := popupText.Render("Riesgo según los modelos: ") + riskStyle[o.Max].Render(" "+o.Max.String()+" ")
 		lines = append(lines, pad(risk))
 		if o.Max > api.HailNone {
 			ref := o.Hours[0].Time
@@ -353,34 +531,50 @@ func (m Model) popupLines(w int) []string {
 				if i == 3 {
 					break
 				}
-				lines = append(lines, pad(popupText.Render("  "+e.Label(ref)+" ")+riskStyle[e.Peak].Render(" "+e.Peak.String()+" ")))
+				extra := ""
+				if o.Members > 0 {
+					extra = fmt.Sprintf(" %.0f%% del ensamble ve tormenta", e.Prob*100)
+				}
+				lines = append(lines, pad(popupText.Render("  "+e.Label(ref)+" ")+
+					riskStyle[e.Peak].Render(" "+e.Peak.String()+" ")+popupDim.Render(extra)))
 			}
 			if cape := o.PeakCAPE(); cape > 0 {
-				lines = append(lines, text(fmt.Sprintf("Tamaño probable: %s (CAPE %.0f J/kg; chico no es inofensivo)", api.HailSize(cape), cape)))
+				lines = append(lines, text(fmt.Sprintf("Tamaño probable: %s (chico no es inofensivo)", api.HailSize(cape, o.PeakSHIP()))))
 			}
 		}
-		explicit := "no"
-		if o.Explicit {
-			explicit = "SÍ"
+		if len(o.Models) > 0 {
+			var parts []string
+			for _, mp := range o.Models {
+				parts = append(parts, fmt.Sprintf("%s %.0f", mp.Name, mp.MaxCAPE))
+			}
+			lines = append(lines, text("CAPE máx (J/kg): "+strings.Join(parts, " · ")))
 		}
 		switch {
 		case !o.Crossed:
 		case o.Disagree:
-			lines = append(lines, text("GFS ve menos energía que ICON: bajamos el riesgo."))
+			lines = append(lines, text("Los modelos no coinciden: vale el nivel que sostienen dos."))
 		default:
-			lines = append(lines, text("Contrastado con GFS: no lo contradice."))
+			lines = append(lines, text(fmt.Sprintf("Los %d modelos coinciden.", len(o.Models))))
 		}
 		if lvl, ok := m.officialHail(); ok && o.Max < api.HailModerate {
-			lines = append(lines, hi("Ojo: el SMN avisa "+strings.ToLower(lvl.String())+" con granizo y el modelo no lo ve."))
+			lines = append(lines, hi("Ojo: el SMN avisa "+strings.ToLower(lvl.String())+" con granizo y los modelos no lo ven."))
 		}
-		lines = append(lines,
-			text("Granizo explícito en ICON (códigos 96/99): "+explicit),
-			text(fmt.Sprintf("CAPE máx %.0f J/kg · isoterma 0 °C mín %.0f m", o.MaxCAPE, o.MinFZL)))
+		tail := fmt.Sprintf("SHIP máx %.1f · isoterma 0 °C mín %.0f m", o.MaxSHIP, o.MinFZL)
+		if o.Explicit {
+			tail += " · granizo explícito (96/99)"
+		}
+		lines = append(lines, text(tail))
 	}
 	lines = append(lines, pad(""),
-		dim("Ni los avisos ni los modelos aciertan siempre con el granizo:"),
-		dim("tomalo como orientación, no como certeza."),
+		dim("Nadie acierta siempre con el granizo: orientación, no certeza."),
 		pad(""))
+
+	// Registro de aciertos: lo que viste vos es el dato que más vale.
+	lines = append(lines, text("¿Qué pasó en tu zona?  1 nada · 2 lluvia fuerte · 3 granizo"))
+	if m.lastReport != "" {
+		lines = append(lines, hi("Anotado "+m.lastReport+" en el registro."))
+	}
+	lines = append(lines, pad(""))
 
 	btn := popupBtn.Render("  Aceptar  ")
 	left := (w - lipgloss.Width(btn)) / 2
@@ -443,6 +637,20 @@ func sentence(s string) string {
 func (m Model) popupBox() string {
 	w := min(72, m.width-10) // ancho interior
 	body := m.popupLines(w - 2)
+	// En terminales bajas no entra todo: primero sacamos los renglones en
+	// blanco y, si aun así no alcanza, cortamos desde abajo (queda el botón).
+	if room := m.height - 4; len(body) > room && room > 2 {
+		tight := body[:0:0]
+		for i, l := range body {
+			if strings.TrimSpace(ansi.Strip(l)) != "" || i == len(body)-2 {
+				tight = append(tight, l)
+			}
+		}
+		body = tight
+		if len(body) > room {
+			body = append(body[:room-1:room-1], body[len(body)-1])
+		}
+	}
 
 	title := " AVISOS Y GRANIZO "
 	side := w - lipgloss.Width(title)

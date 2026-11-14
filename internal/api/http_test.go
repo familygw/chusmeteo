@@ -135,7 +135,7 @@ func TestRadar(t *testing.T) {
 		t.Fatalf("índice: %+v, %v", idx, err)
 	}
 	last := idx.Frames[len(idx.Frames)-1]
-	ri, err := FetchRadarFrame(context.Background(), idx.Host, last)
+	ri, err := FetchRadarFrame(context.Background(), idx, last)
 	if err != nil {
 		t.Fatal(err)
 	}

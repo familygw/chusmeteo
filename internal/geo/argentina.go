@@ -203,37 +203,53 @@ func Grid(step float64) []LatLon {
 // Argentina no salga "aplastada". Cada píxel es medio carácter de alto
 // (usamos ▀), así que los píxeles son aproximadamente cuadrados.
 type Projection struct {
-	W, H  int
-	scale float64 // píxeles por grado de latitud
-	k     float64 // cos(latitud media)
+	W, H        int
+	scale       float64 // píxeles por grado de latitud
+	k           float64 // cos(latitud media)
+	north, west float64 // esquina superior izquierda
+}
+
+// Box es un rectángulo en lat/lon.
+type Box struct{ North, South, East, West float64 }
+
+// Has dice si el punto cae dentro del rectángulo.
+func (b Box) Has(pt LatLon) bool {
+	return pt.Lat <= b.North && pt.Lat >= b.South && pt.Lon >= b.West && pt.Lon <= b.East
 }
 
 // NewProjection elige la escala para que el mapa entre en maxW x maxH píxeles.
 func NewProjection(maxW, maxH int) Projection {
-	k := math.Cos((Bounds.North + Bounds.South) / 2 * math.Pi / 180)
-	latSpan := Bounds.North - Bounds.South
-	lonSpan := (Bounds.East - Bounds.West) * k
+	return NewBoxProjection(Box{Bounds.North, Bounds.South, Bounds.East, Bounds.West}, maxW, maxH)
+}
+
+// NewBoxProjection: lo mismo para un rectángulo cualquiera (un "zoom" a una región).
+func NewBoxProjection(b Box, maxW, maxH int) Projection {
+	k := math.Cos((b.North + b.South) / 2 * math.Pi / 180)
+	latSpan := b.North - b.South
+	lonSpan := (b.East - b.West) * k
 	scale := math.Min(float64(maxH)/latSpan, float64(maxW)/lonSpan)
 	return Projection{
 		W:     int(math.Round(lonSpan * scale)),
 		H:     int(math.Round(latSpan * scale)),
 		scale: scale,
 		k:     k,
+		north: b.North,
+		west:  b.West,
 	}
 }
 
 // ToPixel: coordenada -> píxel (puede caer fuera del lienzo).
 func (p Projection) ToPixel(pt LatLon) (x, y int) {
-	x = int((pt.Lon - Bounds.West) * p.k * p.scale)
-	y = int((Bounds.North - pt.Lat) * p.scale)
+	x = int(math.Floor((pt.Lon - p.west) * p.k * p.scale)) // Floor: int() redondea hacia cero y metería en el borde puntos de afuera
+	y = int(math.Floor((p.north - pt.Lat) * p.scale))
 	return x, y
 }
 
 // ToLatLon: centro de un píxel -> coordenada.
 func (p Projection) ToLatLon(x, y int) LatLon {
 	return LatLon{
-		Lat: Bounds.North - (float64(y)+0.5)/p.scale,
-		Lon: Bounds.West + (float64(x)+0.5)/(p.scale*p.k),
+		Lat: p.north - (float64(y)+0.5)/p.scale,
+		Lon: p.west + (float64(x)+0.5)/(p.scale*p.k),
 	}
 }
 

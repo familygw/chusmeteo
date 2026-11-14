@@ -120,7 +120,13 @@ type Model struct {
 	alerts     alertState
 	obs        obsState
 	hail       hailState
+	cells      nowState // nowcast de celdas con el radar ("now" ya es la hora)
 	showAlerts bool
+
+	// registro de aciertos (registro.go)
+	logged     map[string]bool // lo ya anotado en esta ejecución
+	logCell    string          // último estado anotado de las celdas
+	lastReport string          // "19:08 lluvia fuerte": confirmación en el popup
 
 	// efectos
 	rx      *fx.Reception // nil = no hay recepción en curso
@@ -156,14 +162,15 @@ func New(city string, opts Options) Model {
 	)
 
 	return Model{
-		opts:  opts,
-		view:  opts.View,
-		city:  city,
-		state: stateLoading,
-		radar: radarState{playing: true},
-		input: ti,
-		spin:  sp,
-		now:   time.Now(),
+		opts:   opts,
+		view:   opts.View,
+		city:   city,
+		state:  stateLoading,
+		radar:  radarState{playing: true},
+		logged: map[string]bool{},
+		input:  ti,
+		spin:   sp,
+		now:    time.Now(),
 	}
 }
 
@@ -216,13 +223,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.obs.loc != msg.loc.Name {
 			m.obs = obsState{loc: msg.loc.Name}
 		}
+		if m.radar.loc != msg.loc.Name { // otra ciudad = quizás otro radar: se vuelve a elegir
+			m.radar = radarState{playing: m.radar.playing, loc: msg.loc.Name}
+		}
+		if m.cells.loc != msg.loc.Name { // la grilla del radar está centrada en la ciudad
+			m.cells = nowState{loc: msg.loc.Name}
+		}
 		m, ocmd := m.ensureObs()
-		return m, tea.Batch(scheduleRefresh(m.gen), fetchHail(msg.loc), ocmd)
+		m, ncmd := m.ensureNow()
+		m, dcmd := m.ensureData() // el radar esperaba la ubicación para elegir cuál usar
+		return m, tea.Batch(scheduleRefresh(m.gen), fetchHail(msg.loc), ocmd, ncmd, dcmd)
 
 	case errMsg:
 		m.err = msg.err
 		m.state = stateError
-		return m, nil
+		return m.ensureData() // sin ubicación, el radar cae al mosaico nacional
 
 	case refreshMsg:
 		if msg.gen != m.gen || m.state == stateLoading {
@@ -259,7 +274,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case alertsMsg:
-		return m.onAlerts(msg.res), nil
+		m = m.onAlerts(msg.res)
+		return m, m.logAlerts()
 
 	case satImgMsg:
 		m.sat.img, m.sat.path, m.sat.mod = msg.img, msg.path, msg.mod
@@ -271,10 +287,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case obsMsg:
 		m.obs = obsState{st: msg.st, loc: m.obs.loc, at: time.Now(), tried: m.obs.tried}
-		return m, nil
+		return m, m.logObs()
 
 	case obsErrMsg:
 		m.obs.loading, m.obs.err = false, msg.err
+		return m, nil
+
+	case nowMsg:
+		if msg.loc == m.cells.loc { // si cambió la ciudad mientras bajaba, se descarta
+			m.cells = nowState{nc: msg.nc, grids: msg.grids, loc: msg.loc, at: time.Now(), tried: m.cells.tried}
+			return m.logCells()
+		}
+		return m, nil
+
+	case nowErrMsg:
+		if msg.loc == m.cells.loc {
+			m.cells.loading, m.cells.err = false, msg.err
+		}
 		return m, nil
 
 	case alertsErrMsg:
@@ -283,7 +312,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case hailMsg:
 		m.hail = hailState{outlook: msg.o}
-		return m, nil
+		return m, m.logModels()
 
 	case hailErrMsg:
 		m.hail.err = msg.err // conservamos el último outlook bueno, si había
@@ -303,6 +332,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			switch msg.String() {
 			case "esc", "enter", " ", "f4", "!", "q":
 				m.showAlerts = false
+			case "1", "2", "3": // "¿qué pasó en tu zona?": va al registro de aciertos
+				return m.logUser(msg.String())
 			case "ctrl+c":
 				return m, tea.Quit
 			}

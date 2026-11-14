@@ -169,28 +169,104 @@ func TestEstimateHailRisk(t *testing.T) {
 }
 
 func TestGetHailOutlook(t *testing.T) {
-	srv := fakeServer(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Query().Get("models") == "gfs_seamless" {
-			fmt.Fprint(w, `{"hourly":{"time":["2026-10-24T16:00","2026-10-24T17:00","2026-10-24T18:00"],"cape":[100,200,3000]}}`)
-			return
+	times := `"time":["2026-10-24T16:00","2026-10-24T17:00","2026-10-24T18:00"]`
+	main := fakeServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Query().Get("models"); !strings.HasPrefix(got, "icon_seamless,gfs_seamless") {
+			t.Errorf("models = %q", got)
 		}
-		if r.URL.Query().Get("models") != "icon_seamless" {
-			t.Errorf("models = %q", r.URL.Query().Get("models"))
-		}
-		fmt.Fprint(w, `{"hourly":{"time":["2026-10-24T16:00","2026-10-24T17:00","2026-10-24T18:00"],
-			"weather_code":[3,95,99],"cape":[400,2100,null],"freezing_level_height":[4300,4100,3900]}}`)
+		// 16 h: nadie ve nada. 17 h: sólo ICON ve mucho (no alcanza). 18 h: ICON y GFS coinciden.
+		fmt.Fprint(w, `{"elevation":400,"hourly":{`+times+`,
+			"weather_code_icon_seamless":[3,95,95],"cape_icon_seamless":[400,3000,3000],
+			"freezing_level_height_icon_seamless":[4300,4100,3900],"precipitation_icon_seamless":[0,2,2],
+			"weather_code_gfs_seamless":[3,3,95],"cape_gfs_seamless":[100,200,2100],
+			"precipitation_gfs_seamless":[0,0,3],
+			"weather_code_ecmwf_ifs025":[3,3,null],"cape_ecmwf_ifs025":[0,100,null]}}`)
 	})
-	forecastURL = srv.URL
+	ens := fakeServer(t, func(w http.ResponseWriter, r *http.Request) {
+		// 4 miembros; a las 18 h (y sus vecinas, por el ±1 h) 3 ven tormenta.
+		fmt.Fprint(w, `{"hourly":{`+times+`,
+			"cape_ncep_gefs_seamless":[0,0,900],"precipitation_ncep_gefs_seamless":[0,0,1],
+			"cape_member01_ncep_gefs_seamless":[0,0,900],"precipitation_member01_ncep_gefs_seamless":[0,0,1],
+			"cape_member01_ecmwf_ifs025_ensemble":[0,0,900],"precipitation_member01_ecmwf_ifs025_ensemble":[0,0,1],
+			"cape_member02_ecmwf_ifs025_ensemble":[0,0,900],"precipitation_member02_ecmwf_ifs025_ensemble":[0,0,0],
+			"cape_member01_icon_seamless_eps":[null,null,null],"precipitation_member01_icon_seamless_eps":[5,5,5]}}`)
+	})
+	forecastURL, ensembleURL = main.URL, ens.URL
 	o, err := GetHailOutlook(context.Background(), Location{Latitude: -31.4, Longitude: -64.2})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if o.Max != HailHigh || !o.Explicit || o.MaxCAPE != 2100 || o.MinFZL != 3900 {
+	if len(o.Hours) != 3 || o.Max != HailModerate || o.MaxCAPE != 3000 || o.MinFZL != 3900 {
 		t.Errorf("outlook: %+v", o)
+	}
+	if r := o.Hours[1].Risk; r != HailNone {
+		t.Errorf("17 h: sólo ICON ve riesgo, el consenso debería ser NULO y dio %v", r)
 	}
 	from, to, ok := o.Window(HailModerate)
 	if !ok || from.Hour() != 18 || to.Hour() != 18 || !o.Crossed || !o.Disagree {
 		t.Errorf("ventana %v-%v ok=%v cruce=%v/%v", from, to, ok, o.Crossed, o.Disagree)
+	}
+	if len(o.Models) != 3 || o.Models[0].Name != "ICON" || o.Models[1].MaxCAPE != 2100 {
+		t.Errorf("modelos: %+v", o.Models)
+	}
+	if o.Members != 4 || o.MaxProb != 0.75 || o.Hours[0].Prob != 0 || o.Hours[2].Models != 2 {
+		t.Errorf("ensamble: miembros=%d maxProb=%v horas=%+v", o.Members, o.MaxProb, o.Hours)
+	}
+}
+
+func TestShortTermAlert(t *testing.T) {
+	x := capXML("TORMENTAS FUERTES", "2099-01-01T00:00:00-03:00", cbaPoly, "Alert")
+	a, err := ParseCAP([]byte(x), "https://ssl.smn.gob.ar/feeds/CAP/avisocortoplazo/2026_11_13_1838_cap_es.xml")
+	if err != nil || !a.ShortTerm {
+		t.Errorf("debería ser de corto plazo: %+v %v", a, err)
+	}
+	// El XML dice 17:00-03:00, pero en estos avisos esa hora es UTC (14:00 de Argentina).
+	if want := time.Date(2026, 10, 24, 17, 0, 0, 0, time.UTC); !a.Sent.Equal(want) {
+		t.Errorf("Sent = %v, want %v", a.Sent, want)
+	}
+	// Una alerta común vive en otra carpeta (y puede decir urgency=Immediate igual).
+	b, _ := ParseCAP([]byte(x), "https://ssl.smn.gob.ar/feeds/CAP/xml_generados/CAP_1.xml")
+	if b.ShortTerm {
+		t.Error("una alerta común no es de corto plazo")
+	}
+	list := []*Alert{b, a}
+	SortAlerts(list, geo.LatLon{Lat: -31.4, Lon: -64.2})
+	if list[0] != a {
+		t.Error("el aviso a corto plazo debería ir primero")
+	}
+}
+
+func TestConsensus(t *testing.T) {
+	for _, c := range []struct {
+		in   []HailRisk
+		want HailRisk
+	}{
+		{[]HailRisk{HailHigh}, HailHigh},
+		{[]HailRisk{HailHigh, HailNone}, HailNone},
+		{[]HailRisk{HailHigh, HailLow, HailModerate, HailNone}, HailModerate},
+		{[]HailRisk{HailHigh, HailHigh, HailNone, HailNone}, HailHigh},
+	} {
+		if got := consensus(c.in); got != c.want {
+			t.Errorf("consensus(%v) = %v, want %v", c.in, got, c.want)
+		}
+	}
+}
+
+func TestSHIP(t *testing.T) {
+	// Ambiente de granizo grande: mucha energía, aire frío arriba, buena cizalladura.
+	big := SHIPInputs{CAPE: 3000, DewPoint: 20, Pressure: 960, T500: -14, T700: 6,
+		Z500: 5700, Z700: 3100, ShearKmh: 80, FreezingAGL: 3600}
+	if s := SHIP(big); s < 1.5 || s > 4 {
+		t.Errorf("SHIP ambiente severo = %.2f", s)
+	}
+	// Lo mismo con poca energía: los ajustes lo aplastan.
+	weak := big
+	weak.CAPE = 400
+	if s := SHIP(weak); s > 0.2 {
+		t.Errorf("SHIP con CAPE 400 = %.2f", s)
+	}
+	if s := SHIP(SHIPInputs{}); s != 0 {
+		t.Errorf("SHIP sin datos = %v", s)
 	}
 }
 

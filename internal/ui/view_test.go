@@ -6,12 +6,14 @@ import (
 	"image/color"
 	"math"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"chusmeteo/internal/api"
 	"chusmeteo/internal/geo"
+	"chusmeteo/internal/registro"
 	"chusmeteo/internal/sdr"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -271,8 +273,12 @@ func TestNoFX(t *testing.T) {
 func TestRadarFlow(t *testing.T) {
 	m := New("Córdoba, AR", Options{View: viewRadar})
 	m, _ = send(m, tea.WindowSizeMsg{Width: 80, Height: 24})
+	if m.radar.loading {
+		t.Fatal("sin ubicación todavía no se puede elegir el radar")
+	}
+	m, _ = send(m, weatherMsg{loc: api.Location{Name: "Córdoba", Latitude: -31.42, Longitude: -64.18}, fc: &api.Forecast{}})
 	if !m.radar.loading {
-		t.Fatal("arrancando en radar debería pedir el índice")
+		t.Fatal("con la ubicación lista debería pedir el índice")
 	}
 	idx := fakeIndex()
 	m, _ = send(m, radarIndexMsg{idx})
@@ -406,11 +412,182 @@ func TestSatView(t *testing.T) {
 	}
 }
 
+func TestCellThreat(t *testing.T) {
+	m := fakeModel(140, 50, Options{})
+	m.alerts = alertState{}
+	m.cells.nc = &api.Nowcast{Time: m.now.Add(-8 * time.Minute), Frames: 3, Near: true, NearKm: 42, NearDir: "SO",
+		NearLevel: 4, Moving: true, SpeedKmh: 50, Toward: "NE",
+		Approaching: true, ETA: m.now.Add(35 * time.Minute), ETALevel: 4, FromDir: "SO"}
+	if h := m.headerView(); !strings.Contains(h, "CELDA EN 35 MIN") {
+		t.Errorf("la barra debería avisar de la celda: %q", h)
+	}
+	m.showAlerts = true
+	out := m.View()
+	for _, want := range []string{"a 42 km al SO", "va al NE a 50 km/h", "Llegaría uno intenso desde el SO", "en 35 min", "puede traer granizo"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("popup: falta %q", want)
+		}
+	}
+	m.cells.nc.NoCoverage = true // sin radar no se afirma nada, ni en la barra ni en el popup
+	if out := m.View(); strings.Contains(m.headerView(), "CELDA") || !strings.Contains(out, "Sin radar") {
+		t.Error("sin cobertura debería decirlo y no avisar de celdas")
+	}
+	m.cells.nc.NoCoverage = false
+	m.cells.nc.ETA = m.now.Add(3 * time.Hour) // lejos: se informa, pero la barra no titila
+	if strings.Contains(m.headerView(), "CELDA") {
+		t.Error("una celda a 3 horas no debería ir a la barra")
+	}
+}
+
+// Radar local: zoom a la zona del radar, niveles por dBZ y resumen de celdas.
+func TestLocalRadarView(t *testing.T) {
+	area := geo.Box{North: -29.3, South: -33.5, East: -61.6, West: -66.7}
+	img := image.NewRGBA(image.Rect(0, 0, 100, 100))
+	for y := 60; y < 75; y++ { // una franja "intensa" al sur de la ciudad
+		for x := 30; x < 70; x++ {
+			img.Set(x, y, color.RGBA{255, 0, 0, 255})
+		}
+	}
+	level := func(c color.RGBA) int {
+		if c.A == 0 {
+			return 0
+		}
+		return 4
+	}
+	for _, size := range sizes {
+		m := fakeModel(size[0], size[1], Options{View: viewRadar, NoFX: true})
+		idx := &api.RadarIndex{Source: "RMA1 Cordoba", Area: &area}
+		for i := range 3 {
+			idx.Frames = append(idx.Frames, api.RadarFrame{Time: m.now.Add(time.Duration(i-3) * 9 * time.Minute), Path: fmt.Sprintf("ohmc:%d", i)})
+		}
+		m, _ = send(m, radarIndexMsg{idx})
+		for _, f := range idx.Frames {
+			m, _ = send(m, radarFrameMsg{api.NewLocalRadarImage(f, img, area, level)})
+		}
+		m.cells.nc = &api.Nowcast{Time: m.now.Add(-4 * time.Minute), Near: true, NearKm: 22, NearDir: "S", NearLevel: 4, DBZ: true}
+		out := m.View()
+		if w := lipgloss.Width(out); w > size[0] {
+			t.Errorf("%dx%d: ancho %d", size[0], size[1], w)
+		}
+		if h := lipgloss.Height(out); h != size[1] {
+			t.Errorf("%dx%d: alto %d", size[0], size[1], h)
+		}
+		if size[1] < 30 {
+			continue
+		}
+		for _, want := range []string{"RADAR RMA1 CORDOBA", "dBZ", "22 km al S", "OHMC"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("%dx%d: falta %q", size[0], size[1], want)
+			}
+		}
+	}
+	// El zoom cubre el área del radar, no el país.
+	m := fakeModel(120, 40, Options{View: viewRadar})
+	national := m.radarProjection()
+	m.radar.idx = &api.RadarIndex{Area: &area}
+	if local := m.radarProjection(); local.PixelsPerDegree() < 4*national.PixelsPerDegree() {
+		t.Errorf("escala local %.1f vs nacional %.1f px/grado", local.PixelsPerDegree(), national.PixelsPerDegree())
+	}
+}
+
+// Los tests no ejecutan los tea.Cmd, pero por las dudas el registro va a un
+// directorio temporal y nunca al archivo real de la persona.
+func TestMain(m *testing.M) {
+	dir, _ := os.MkdirTemp("", "chusmeteo-test")
+	registro.Path = filepath.Join(dir, "registro.jsonl")
+	code := m.Run()
+	os.RemoveAll(dir)
+	os.Exit(code)
+}
+
+func TestRegistro(t *testing.T) {
+	registro.Path = filepath.Join(t.TempDir(), "registro.jsonl")
+	m := fakeModel(140, 50, Options{})
+	run := func(cmd tea.Cmd) { // ejecuta el comando (y los de un Batch) como haría Bubble Tea
+		if cmd == nil {
+			return
+		}
+		if b, ok := cmd().(tea.BatchMsg); ok {
+			for _, c := range b {
+				if c != nil {
+					c()
+				}
+			}
+		}
+	}
+	// Llega un nowcast con una celda en camino: una entrada. El mismo estado de nuevo: ninguna.
+	nc := &api.Nowcast{Time: m.now.Add(-5 * time.Minute), Near: true, NearKm: 22, NearDir: "S", NearLevel: 4,
+		Moving: true, SpeedKmh: 45, Toward: "NE", Approaching: true, ETA: m.now.Add(13 * time.Minute), ETALevel: 4, FromDir: "S", DBZ: true}
+	m.cells.loc = "Córdoba"
+	var cmd tea.Cmd
+	m, cmd = send(m, nowMsg{nc: nc, loc: "Córdoba"})
+	run(cmd)
+	m, cmd = send(m, nowMsg{nc: nc, loc: "Córdoba"})
+	run(cmd)
+	// La persona anota lo que vio desde el popup.
+	m.showAlerts = true
+	m, cmd = send(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("2")})
+	run(cmd)
+	if out := m.View(); !strings.Contains(out, "lluvia fuerte en el registro") {
+		t.Error("el popup debería confirmar lo anotado")
+	}
+
+	body, err := os.ReadFile(registro.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(body)), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("esperaba 2 entradas, hay %d:\n%s", len(lines), body)
+	}
+	for i, want := range []string{`"tipo":"celda"`, `"tipo":"usuario"`} {
+		if !strings.Contains(lines[i], want) || !strings.Contains(lines[i], `"isoterma_m":4100`) || !strings.Contains(lines[i], `"ciudad":"Córdoba"`) {
+			t.Errorf("entrada %d: %s", i, lines[i])
+		}
+	}
+	if !strings.Contains(lines[1], `"que":"lluvia fuerte"`) || !strings.Contains(lines[1], `"eta_nivel":4`) {
+		t.Errorf("entrada del usuario: %s", lines[1])
+	}
+}
+
+func TestBadgePriority(t *testing.T) {
+	m := fakeModel(140, 50, Options{})
+	// Alerta por zona sola: contexto del día. (El titileo es sólo de color y en
+	// los tests no hay colores, así que acá se prueba el texto y la prioridad.)
+	if a := m.alertBadge(false); !strings.Contains(a, "AVISO SMN") {
+		t.Errorf("falta la alerta por zona: %q", a)
+	}
+	// Granizo observado cerca: urgente.
+	m.obs.st = []api.Station{{ICAO: "SACO", DistKm: 16, HailAt: m.now.Add(-20 * time.Minute)}}
+	if h := m.headerView(); !strings.Contains(h, "GRANIZO OBSERVADO") {
+		t.Errorf("falta el granizo observado: %q", h)
+	}
+	// Aviso a corto plazo sobre la ciudad: le gana al observado.
+	m.alerts.byURL[m.alerts.current[0]].ShortTerm = true
+	if a := m.alertBadge(false); !strings.Contains(a, "CORTO PLAZO") {
+		t.Errorf("falta el aviso a corto plazo: %q", a)
+	}
+}
+
+func TestHailNoteUsesFreezingLevel(t *testing.T) {
+	m := fakeModel(140, 50, Options{})
+	m.cells.nc = &api.Nowcast{Time: m.now.Add(-5 * time.Minute), Near: true, NearKm: 3, NearDir: "S", NearLevel: 4,
+		Overhead: true, OverLevel: 4, DBZ: true, Source: "radar RMA1 Cordoba"}
+	m.showAlerts = true
+	if out := m.View(); !strings.Contains(out, "puede traer granizo") {
+		t.Error("con isoterma a 4100 m debería advertir por granizo")
+	}
+	m.hail.outlook.Hours[0].FreezingLevel = 5100
+	if out := m.View(); !strings.Contains(out, "granizo poco probable (0 °C a 5100 m)") {
+		t.Error("con isoterma a 5100 m debería decir que el granizo es poco probable")
+	}
+}
+
 func TestHailSummarySeparatesOfficialAndModel(t *testing.T) {
 	m := fakeModel(200, 50, Options{})
 	s := m.hailSummary()
-	if !strings.Contains(s, "SMN") || !strings.Contains(s, "ICON") {
-		t.Errorf("falta SMN o ICON: %q", s)
+	if !strings.Contains(s, "SMN") || !strings.Contains(s, "MODELOS") {
+		t.Errorf("falta SMN o MODELOS: %q", s)
 	}
 	if w := lipgloss.Width(s); w > 38 {
 		t.Errorf("el resumen mide %d: se envolvería y dejaría un hueco negro", w)

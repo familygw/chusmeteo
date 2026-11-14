@@ -361,7 +361,7 @@ func truncate(s string, n int) string {
 	return string(r[:n-1]) + "…"
 }
 
-// hailSummary: una línea con el aviso oficial (SMN) y el riesgo del modelo (ICON), por separado.
+// hailSummary: una línea con el aviso oficial (SMN) y el riesgo de los modelos, por separado.
 // Tiene que entrar en el ancho de la columna (38): si se envuelve, se ve un hueco negro.
 func (m Model) hailSummary() string {
 	const room = 38
@@ -382,9 +382,9 @@ func (m Model) hailSummary() string {
 	o := m.hail.outlook
 	if o == nil {
 		if m.hail.err != nil {
-			add(base, "ICON sin datos")
+			add(base, "modelos sin datos")
 		} else {
-			add(base, "consultando ICON...")
+			add(base, "consultando modelos...")
 		}
 		return out
 	}
@@ -394,9 +394,11 @@ func (m Model) hailSummary() string {
 		api.HailModerate: valueStyle.Foreground(vgaYellow),
 		api.HailHigh:     valueStyle.Foreground(vgaLRed).Blink(true),
 	}
-	add(base, "ICON ")
-	add(styles[o.Max], o.Max.String())
-	if eps := o.Episodes(max(o.Max, api.HailLow)); len(eps) > 0 && o.Max > api.HailNone {
+	// Acá va lo de hoy y mañana temprano; el popup muestra las 48 h.
+	top := o.MaxWithin(24 * time.Hour)
+	add(base, "MODELOS ")
+	add(styles[top], top.String())
+	if eps := o.Episodes(max(top, api.HailLow)); len(eps) > 0 && top > api.HailNone {
 		if l := " " + eps[0].Label(o.Hours[0].Time); width()+lipgloss.Width(l) <= room-5 {
 			add(valueStyle, l)
 		}

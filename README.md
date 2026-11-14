@@ -10,16 +10,23 @@ Tres vistas:
 
 1. **Clima**: condiciones actuales, pronóstico de hasta 7 días y, si hay alto, un gráfico de las próximas 24 horas.
 2. **Mapa**: Argentina coloreada por temperatura, con 12 ciudades de referencia y la dirección del viento en cada una (`↗`). Con `←` `→` se navega el pronóstico hora a hora (hasta +23 h).
-3. **Radar**: precipitación de las últimas 2 horas, animada.
+3. **Radar**: precipitación animada. Con un radar argentino cerca, zoom a tu región con reflectividad real (dBZ); si no, el país entero con Rain Viewer.
 
 Y con **F4**, un popup al estilo de los diálogos de Norton Commander con todo lo
 que hay sobre **granizo**: los avisos vigentes del SMN para tu ciudad (y cuántos hay
-en el resto del país) y el riesgo de las próximas 24 h según el modelo ICON, contrastado
-con GFS. Cada tramo de riesgo indica el día ("hoy 15–18 h", "mañana 14 h"). También
+en el resto del país, con los de **corto plazo** primero), las **celdas fuertes** que el
+radar ve a menos de 120 km y si alguna viene hacia vos, y el riesgo de las próximas 48 h
+según cuatro modelos (ICON, GFS, ECMWF, GEM) y un ensamble de 80 corridas.
+Cada tramo de riesgo indica el día ("hoy 15–18 h", "mañana 14 h"). También
 muestra lo **observado** en los aeropuertos cercanos (METAR, hasta ~200 km): tormenta (`TS`) y
 granizo (`GR`) reportados en las últimas 3 h. Si una estación a menos de 100 km reporta
 granizo en los últimos 90 min, la barra superior avisa igual. Si hay
-algo, la barra superior titila con `⚠ AVISO SMN` o `⚠ GRANIZO?`.
+algo urgente para tu punto, la barra superior **titila**: `⚠ CELDA EN 35 MIN` (radar),
+`⚠ AVISO A CORTO PLAZO` (SMN) o `⚠ GRANIZO OBSERVADO CERCA` (aeropuerto). La alerta por
+zona del SMN y el riesgo de los modelos quedan fijos, sin titilar (`⚠ AVISO SMN`,
+`⚠ GRANIZO?`): son el contexto del día, y las alertas por zona nombran el granizo siempre.
+Si viene un núcleo intenso pero la isoterma de 0 °C está por encima de 4600 m, el popup
+dice "lluvia muy intensa; granizo poco probable".
 
 Las vistas de mapa "se reciben" como en una PC de los 90 conectada a una antena:
 la imagen baja línea por línea, con estática, franjas de sincronismo a la izquierda,
@@ -67,7 +74,7 @@ O con `make`: `make run`, `make test`, `make build`, `make build-all`.
 | `F2` / `Tab`     | Cambiar de vista (`1` clima · `2` mapa · `3` radar)  |
 | `F3` / `/`       | Buscar ciudad (`"Córdoba, ES"` filtra por país)     |
 | `g`              | Usar la ubicación de la compu (macOS)               |
-| `F4` / `!`       | Avisos del SMN y riesgo de granizo (popup)          |
+| `F4` / `!`       | Avisos del SMN y riesgo de granizo (popup); ahí, `1` `2` `3` anotan qué pasó |
 | `F5` / `r`       | Refrescar ahora                                     |
 | `a`              | Repetir la recepción del satélite                   |
 | `Espacio`        | Radar: play / pausa                                 |
@@ -94,7 +101,8 @@ internal/
             data/sudamerica.json lo genera tools/nedata/extract.py
   render/   lienzo de medios bloques (▀), paletas, tramado Bayer, mapas, gráfico horario
   fx/       efecto de recepción APT: barrido, estática, sincronismo, Doppler
-  ui/       modelo/Update (model.go), datos y comandos (data.go), vistas (view.go, mapview.go, satview.go)
+  ui/       modelo/Update (model.go), datos y comandos (data.go), vistas (view.go, mapview.go, satview.go),
+            avisos, nowcast y popup de granizo (alerts.go)
   sdr/      modo hardcore: lanza SatDump con el RTL-SDR y busca la imagen más nueva
 ```
 
@@ -164,6 +172,58 @@ En la vista de clima aparece una línea `GRANIZO` y, bajo el gráfico de 24 h, u
 el riesgo por hora. En el radar, el nivel más alto se llama "Intensa (posible granizo)":
 el eco fuerte sugiere granizo pero no lo confirma.
 
+**v0.9, granizo en serio.** Tres horizontes, cada uno con la fuente que mejor lo ve:
+
+- *Próxima hora: el radar* (`api/nowcast.go`, `api/ohmc.go`). Cada 5 min se bajan los
+  últimos 3 cuadros del **radar argentino más cercano** (RMA1 Córdoba, Ezeiza, Paraná...)
+  desde la API pública del visor [WebMet](https://webmet.ohmc.ar) del Observatorio
+  Hidro-Meteorológico de Córdoba: producto COLMAX (el eco más fuerte de la columna), un
+  cuadro cada ~9 min. Los tiles se piden siempre con la misma paleta y se invierte color →
+  **dBZ reales** (`getOHMCPalette`); desde 45 dBZ es núcleo fuerte y desde 55, intenso con
+  granizo posible (`DBZLevel`). El 13/11/2026 pasó un núcleo de 55+ dBZ a menos de 8 km del
+  sur de Córdoba capital con lluvia fuerte y sin granizo (isoterma de 0 °C a ~5100 m). Con zoom 7 (~1 km por píxel, 2x2 tiles) se arma una grilla de 2 km;
+  el desplazamiento entre cuadros sale de una correlación cruzada por fuerza bruta
+  (`bestShift`) y cada núcleo se extrapola en línea recta: si pasa a menos de 8 km, hay
+  hora estimada de llegada. Sirve para ~1 hora: las tormentas nacen, mueren y giran.
+- *Próximas 1–3 horas: avisos a corto plazo del SMN.* Vienen en el mismo feed CAP (carpeta
+  `avisocortoplazo`, `urgency=Immediate`). Ahora se marcan (`Alert.ShortTerm`), van primero
+  y el índice se consulta cada 3 min en vez de 10 (es un solo pedido; los XML se cachean).
+  Ojo: traen la hora en UTC pero rotulada `-03:00`; `asUTC` lo corrige (si no, figuran
+  vigentes 3 horas de más).
+- *Hoy y mañana: los modelos* (`api/hail.go`). Una sola llamada trae ICON, GFS, ECMWF y GEM.
+  Cada uno da su riesgo con la heurística de antes más **SHIP** (Significant Hail Parameter
+  del SPC: CAPE x humedad x gradiente térmico 700–500 hPa x frío a 500 hPa x cizalladura),
+  y el riesgo final es el que sostienen **al menos dos** modelos (`consensus`). El ensamble
+  (GEFS + ECMWF, 80 miembros) dice qué fracción ve tormenta en cada tramo; si casi ninguno,
+  el riesgo baja un escalón. El tamaño probable sale de SHIP cuando se puede calcular.
+
+**Ojo con Rain Viewer.** Al 13/11/2026 no incluye los radares argentinos: su máscara de
+cobertura deja afuera Córdoba, Rosario, Buenos Aires y Mendoza (sólo entra lo que alcanzan
+los radares de Brasil y Paraguay). Por eso el nowcast usa el radar argentino y deja a Rain
+Viewer de respaldo; si tampoco cubre (`covered`, `Nowcast.NoCoverage`), dice "sin radar" en
+vez de "sin celdas".
+
+**Vista Radar con zoom regional.** Si hay un radar argentino a menos de 200 km de la ciudad
+elegida, la vista Radar (tecla 3) deja el mapa nacional y hace zoom a lo que ve ese radar
+(~480 km de lado): hasta 10 cuadros de COLMAX de la última hora y media, cada uno bajado
+como una sola imagen de 473x473 px (`/frames/{id}/image.png`, el mismo pedido que hace el
+visor del Observatorio), con los niveles en dBZ y el resumen de celdas al costado.
+`geo.NewBoxProjection` proyecta un rectángulo cualquiera y el caché de regiones usa la
+proyección entera como clave. Sin radar cerca (o si está caído) vuelve al mosaico nacional
+de Rain Viewer.
+
+Lo que sigue siendo cierto: los modelos globales no resuelven una tormenta (10–25 km de
+grilla), el radar de Rain Viewer llega con ~10 min de demora y un eco intenso sugiere
+granizo pero no lo confirma (ni siquiera 60 dBZ garantizan que llegue al suelo).
+
+**Registro de aciertos** (`internal/registro`, `ui/registro.go`). Cada vez que la app avisa
+algo se agrega un renglón JSON a `registro.jsonl` en el directorio de configuración del
+usuario (macOS: `~/Library/Application Support/chusmeteo/`): celda llegando o encima, aviso
+a corto plazo sobre la ciudad, riesgo moderado/alto de los modelos y granizo reportado por
+un aeropuerto. En el popup F4, las teclas `1` `2` `3` anotan lo que viste vos (nada, lluvia
+fuerte, granizo). Cada renglón lleva una foto del estado (radar, isoterma, CAPE, SHIP,
+avisos), así se entiende solo. Para mirarlo: `jq -c '[.hora,.tipo,.datos.que]' registro.jsonl`.
+
 ## Go para alguien que viene de Java
 
 | Java / Spring                 | Go (y dónde verlo acá)                                         |
@@ -204,7 +264,12 @@ Detalles de Go que aparecen en el código y conviene mirar:
 - [x] **v0.6** granizo: avisos del SMN (CAP) + riesgo según ICON, popup con F4
 - [x] **v0.7** viento con flechas, pronóstico horario en el mapa, granizo contrastado con GFS
 - [x] **v0.8** modo hardcore: vista SAT con RTL-SDR + Meteor-M LRPT (`-hardcore`)
+- [x] **v0.9** nowcast de celdas con el radar, avisos a corto plazo, 4 modelos + SHIP + ensamble a 48 h
 - [ ] Ideas:
+  - mosaico nacional con todos los radares argentinos (hoy el nacional es Rain Viewer, que no los tiene)
+  - localidades cercanas como referencia en el zoom del radar
+  - analizar el registro de aciertos y calibrar con él los umbrales (55 dBZ, isoterma 4600 m, SHIP)
+  - notificación de macOS sin tener la app abierta (`-watch`)
   - zoom a una región en terminales grandes
   - avisos del resto del país con *drill down*: lista de avisos vigentes por provincia y detalle de cada uno
   - avisos vencidos del día (historial), para ver qué pasó aunque ya no estén vigentes
@@ -216,6 +281,7 @@ Detalles de Go que aparecen en el código y conviene mirar:
 - Geografía: [Natural Earth](https://www.naturalearthdata.com) (dominio público)
 - Avisos: [Servicio Meteorológico Nacional](https://ssl.smn.gob.ar/CAP/AR.php) (CAP)
 - Observaciones: [Aviation Weather Center (NOAA)](https://aviationweather.gov/data/api/), METAR/SPECI, sin clave
-- Pronóstico y grilla: [Open-Meteo](https://open-meteo.com) (CC BY 4.0; gratis para uso no comercial, sin API key, ~10.000 llamadas/día)
+- Pronóstico y grilla: [Open-Meteo](https://open-meteo.com) (CC BY 4.0; gratis para uso no comercial, sin API key, ~10.000 llamadas/día), incluida la API de ensambles
+- Radar del nowcast: [Observatorio Hidro-Meteorológico de Córdoba](https://webmet.ohmc.ar) (visor WebMet, radares SINARAME; API pública sin clave: usarla con moderación)
 - Radar: [Rain Viewer](https://www.rainviewer.com/api.html) (uso personal/educativo; atribución visible obligatoria; zoom máx. 7)
 - Los umbrales de intensidad del radar se infieren del color (esquema 2, "Universal Blue") y son aproximados: ver `render.RadarLevel`.

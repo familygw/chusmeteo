@@ -89,3 +89,30 @@ func TestProjectionRoundTrip(t *testing.T) {
 		t.Errorf("lat ida y vuelta: %v", back)
 	}
 }
+
+func TestBoxProjection(t *testing.T) {
+	b := Box{North: -29.3, South: -33.5, East: -61.6, West: -66.7}
+	p := NewBoxProjection(b, 80, 80)
+	cba := LatLon{Lat: -31.42, Lon: -64.18}
+	x, y := p.ToPixel(cba)
+	if x < 0 || y < 0 || x >= p.W || y >= p.H {
+		t.Fatalf("Córdoba cae fuera del zoom: %d,%d en %dx%d", x, y, p.W, p.H)
+	}
+	back := p.ToLatLon(x, y)
+	if d := p.DegPerPixel(); abs(back.Lat-cba.Lat) > d || abs(back.Lon-cba.Lon) > 2*d {
+		t.Errorf("ida y vuelta: %+v", back)
+	}
+	if x, _ := p.ToPixel(LatLon{Lat: -31, Lon: -66.71}); x >= 0 {
+		t.Errorf("un punto al oeste del borde debería dar x negativo, dio %d", x)
+	}
+	if !b.Has(cba) || b.Has(LatLon{Lat: -34.6, Lon: -58.4}) {
+		t.Error("Box.Has")
+	}
+}
+
+func abs(v float64) float64 {
+	if v < 0 {
+		return -v
+	}
+	return v
+}
